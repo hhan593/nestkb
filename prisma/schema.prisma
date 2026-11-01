@@ -1,0 +1,389 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  member
+  admin
+
+  @@map("role")
+}
+
+enum AccessLevel {
+  department
+  company
+  whitelist
+
+  @@map("access_level")
+}
+
+enum DocumentStatus {
+  active
+  archived
+
+  @@map("document_status")
+}
+
+enum SubjectType {
+  dept
+  user
+
+  @@map("subject_type")
+}
+
+enum Effect {
+  allow
+  deny
+
+  @@map("effect")
+}
+
+enum IngestStage {
+  queued
+  parsing
+  chunking
+  embedding
+  storing
+  ready
+  failed
+
+  @@map("ingest_stage")
+}
+
+enum MessageRole {
+  user
+  assistant
+
+  @@map("message_role")
+}
+
+enum MessageStatus {
+  completed
+  failed
+  aborted
+
+  @@map("message_status")
+}
+
+enum QueryScene {
+  qa
+  debug
+  eval
+  cache_lookup
+
+  @@map("query_scene")
+}
+
+enum UsageScene {
+  qa
+  ingest_embed
+  rerank
+  eval
+  summary
+
+  @@map("usage_scene")
+}
+
+enum Rating {
+  up
+  down
+
+  @@map("rating")
+}
+
+enum EvalCaseType {
+  fact
+  table
+  timeliness
+  deny
+  multi_hop
+
+  @@map("eval_case_type")
+}
+
+enum EvalSource {
+  manual
+  feedback
+  incident
+
+  @@map("eval_source")
+}
+
+// ---------- 6.1 部门与用户（权限主体） ----------
+model Department {
+  id         String   @id @default(uuid()) @db.Uuid
+  name       String   @unique
+  quotaMonth Decimal  @default(50.0) @map("quota_month") @db.Decimal(12, 2) // 部门月度预算（元）
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt  DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  users     User[]
+  documents Document[]
+
+  @@map("departments")
+}
+
+model User {
+  id           String   @id @default(uuid()) @db.Uuid
+  departmentId String   @map("department_id") @db.Uuid
+  email        String   @unique
+  passwordHash String   @map("password_hash")
+  role         Role     @default(member)
+  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt    DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  department    Department     @relation(fields: [departmentId], references: [id])
+  conversations Conversation[]
+
+  @@map("users")
+}
+
+// ---------- 6.2 文档与版本 ----------
+model Document {
+  id               String         @id @default(uuid()) @db.Uuid
+  departmentId     String         @map("department_id") @db.Uuid // 归属部门（上传者所在部门）
+  title            String
+  accessLevel      AccessLevel    @default(department) @map("access_level")
+  currentVersionId String?        @map("current_version_id") @db.Uuid
+  status           DocumentStatus @default(active)
+  createdAt        DateTime       @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt        DateTime       @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  department     Department        @relation(fields: [departmentId], references: [id])
+  versions       DocumentVersion[]
+  currentVersion DocumentVersion?  @relation("CurrentVersion", fields: [currentVersionId], references: [id])
+  permissions    DeptPermission[]
+  chunks         DocumentChunk[]
+  ingestionJobs  IngestionJob[]
+
+  @@index([departmentId, status])
+  @@map("documents")
+}
+
+model DocumentVersion {
+  id          String    @id @default(uuid()) @db.Uuid
+  documentId  String    @map("document_id") @db.Uuid
+  versionNo   Int       @map("version_no")
+  storageKey  String    @map("storage_key")
+  mimeType    String    @map("mime_type")
+  effectiveAt DateTime  @default(now()) @map("effective_at") @db.Timestamptz(6) // 时效元数据：过期文档检索降权
+  expiresAt   DateTime? @map("expires_at") @db.Timestamptz(6)
+  checksum    String // sha256：幂等键组成
+  createdAt   DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt   DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  document     Document        @relation(fields: [documentId], references: [id])
+  chunks       DocumentChunk[]
+  ingestionJob IngestionJob?
+  isCurrentFor Document[]      @relation("CurrentVersion")
+
+  @@unique([documentId, versionNo])
+  @@map("document_versions")
+}
+
+// ---------- 6.3 部门授权表（白名单文档的显式授权，default deny） ----------
+model DeptPermission {
+  id          String      @id @default(uuid()) @db.Uuid
+  documentId  String      @map("document_id") @db.Uuid
+  subjectType SubjectType @map("subject_type")
+  subjectId   String      @map("subject_id") @db.Uuid // 部门 id 或用户 id（支持跨部门授权给特定个人）
+  effect      Effect      @default(allow)
+  expiresAt   DateTime?   @map("expires_at") @db.Timestamptz(6) // 授权可带过期（如外协账号）
+  grantedBy   String      @map("granted_by") @db.Uuid
+  createdAt   DateTime    @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt   DateTime    @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  document Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+
+  @@unique([documentId, subjectType, subjectId])
+  @@index([subjectType, subjectId, documentId], map: "idx_dperm_lookup")
+  @@map("dept_permissions")
+}
+
+// ---------- 6.4 分块表（检索的基本单元；方案 A 下即"向量 collection"） ----------
+model DocumentChunk {
+  // dbgenerated：VectorStore 走裸 SQL 插入，id 必须由数据库生成（计划书 DDL DEFAULT gen_random_uuid()）
+  id             String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  documentId     String   @map("document_id") @db.Uuid
+  versionId      String   @map("version_id") @db.Uuid
+  deptId         String   @map("dept_id") @db.Uuid // 冗余权限列：过滤免 JOIN，索引友好
+  chunkNo        Int      @map("chunk_no")
+  content        String
+  headingPath    String   @default("") @map("heading_path") // 章节路径
+  embedding      Unsupported("vector(1024)") // 维度 = EMBEDDING_DIM；读写走 VectorStore
+  embeddingModel String   @map("embedding_model") // 换模型全量重嵌时的灰度区分列
+  tsv            Unsupported("tsvector")?
+  tokenCount     Int      @map("token_count")
+  metadata       Json     @default("{}")
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  document Document        @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  version  DocumentVersion @relation(fields: [versionId], references: [id], onDelete: Cascade)
+
+  @@unique([versionId, chunkNo])
+  @@index([deptId, versionId], map: "idx_chunks_perm")
+  // HNSW 向量索引 / GIN tsv / GIN trgm 由迁移 SQL 手工维护（见 prisma/migrations/*_init/migration.sql）
+  @@map("document_chunks")
+}
+
+// ---------- 6.5 摄取任务表（队列状态的落库镜像） ----------
+model IngestionJob {
+  id            String      @id @default(uuid()) @db.Uuid
+  documentId    String      @map("document_id") @db.Uuid
+  versionId     String      @unique @map("version_id") @db.Uuid // 幂等键
+  stage         IngestStage @default(queued)
+  attempts      Int         @default(0)
+  error         String? // 失败分类+消息，DLQ 重放依据
+  chunkCount    Int?        @map("chunk_count")
+  costEstimated Decimal?    @map("cost_estimated") @db.Decimal(10, 6) // embedding 花费（元）
+  stageTimings  Json        @default("{}") @map("stage_timings") // 各 stage 耗时 ms
+  startedAt     DateTime?   @map("started_at") @db.Timestamptz(6)
+  createdAt     DateTime    @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt     DateTime    @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  document Document        @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  version  DocumentVersion @relation(fields: [versionId], references: [id])
+
+  @@index([stage, updatedAt], map: "idx_jobs_stage")
+  @@map("ingestion_jobs")
+}
+
+// ---------- 6.6 会话与消息 ----------
+model Conversation {
+  id        String   @id @default(uuid()) @db.Uuid
+  userId    String   @map("user_id") @db.Uuid
+  title     String?
+  summary   String? // 多轮压缩后的历史摘要
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  user     User      @relation(fields: [userId], references: [id])
+  messages Message[]
+
+  @@map("conversations")
+}
+
+model Message {
+  id                String        @id @default(uuid()) @db.Uuid
+  conversationId    String        @map("conversation_id") @db.Uuid
+  role              MessageRole
+  content           String
+  citations         Json? // [{no,chunkId,documentId,versionNo,quote,...}]
+  retrievalSnapshot Json?         @map("retrieval_snapshot") // 当次召回 chunk_id + 双路分数 + rerank 分数
+  usageId           String?       @map("usage_id") @db.Uuid
+  latencyMs         Int?          @map("latency_ms")
+  status            MessageStatus @default(completed)
+  createdAt         DateTime      @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt         DateTime      @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  feedbacks    Feedback[]
+
+  @@index([conversationId, createdAt])
+  @@map("messages")
+}
+
+// ---------- 6.7 查询日志表（检索侧原始流水） ----------
+model QueryLog {
+  id               String     @id @default(uuid()) @db.Uuid
+  userId           String?    @map("user_id") @db.Uuid
+  deptId           String?    @map("dept_id") @db.Uuid
+  query            String
+  scene            QueryScene @default(qa)
+  accessFilter     Json       @map("access_filter") // 本次生效的权限过滤条件（审计用）
+  hitCount         Int?       @map("hit_count") // 权限过滤后候选数
+  vectorTop        Json?      @map("vector_top") // 双路原始 top10 {chunkId, score}
+  ftsTop           Json?      @map("fts_top")
+  fusedTop         Json?      @map("fused_top") // RRF 后 top10
+  rerankedTop      Json?      @map("reranked_top") // rerank 后 top8
+  rerankDegraded   Boolean    @default(false) @map("rerank_degraded")
+  latencyBreakdown Json?      @map("latency_breakdown") // {embedMs, vectorMs, ftsMs, rerankMs}
+  totalMs          Int?       @map("total_ms")
+  requestId        String?    @map("request_id")
+  createdAt        DateTime   @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt        DateTime   @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@index([scene, createdAt])
+  @@index([requestId])
+  @@map("query_logs")
+}
+
+// ---------- 6.8 计量表 ----------
+model UsageRecord {
+  id               String     @id @default(uuid()) @db.Uuid
+  userId           String     @map("user_id") @db.Uuid
+  deptId           String     @map("dept_id") @db.Uuid
+  scene            UsageScene
+  provider         String // 配置化路由名
+  promptTokens     Int        @default(0) @map("prompt_tokens")
+  completionTokens Int        @default(0) @map("completion_tokens")
+  cachedTokens     Int        @default(0) @map("cached_tokens") // prompt cache 命中
+  costEstimated    Decimal?   @map("cost_estimated") @db.Decimal(10, 6) // 按 PRICE_JSON 折算（元）
+  requestId        String?    @map("request_id")
+  createdAt        DateTime   @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt        DateTime   @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@index([deptId, createdAt], map: "idx_usage_dept_day")
+  @@index([userId, createdAt])
+  @@index([scene, createdAt])
+  @@map("usage_records")
+}
+
+// ---------- 6.9 反馈表 ----------
+model Feedback {
+  id        String   @id @default(uuid()) @db.Uuid
+  messageId String   @map("message_id") @db.Uuid
+  userId    String   @map("user_id") @db.Uuid
+  rating    Rating
+  reasons   String[] // wrong | no_citation | outdated | not_found | other
+  comment   String?
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  message Message @relation(fields: [messageId], references: [id], onDelete: Cascade)
+
+  @@index([rating, createdAt])
+  @@map("feedbacks")
+}
+
+// ---------- 6.10 评估集与回归结果 ----------
+model EvalCase {
+  id           String       @id @default(uuid()) @db.Uuid
+  question     String
+  caseType     EvalCaseType @default(fact) @map("case_type")
+  goldAnswer   String?      @map("gold_answer") // 标注答案（deny 类用例可空）
+  goldChunkIds String[]     @map("gold_chunk_ids") // 期望命中的 chunk（Recall/引用准确率基准）
+  goldMarkers  String[]     @map("gold_markers") // 语料锚点短语：跑批时解析为 chunk id 回填 goldChunkIds
+  source       EvalSource   @default(manual) // 人工/点踩/失败专项 三来源防过拟合
+  active       Boolean      @default(true)
+  expectDeny   Boolean      @default(false) @map("expect_deny")
+  createdAt    DateTime     @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt    DateTime     @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@index([source, active])
+  @@map("eval_cases")
+}
+
+model EvalRun {
+  id             String   @id @default(uuid()) @db.Uuid
+  datasetVersion String   @map("dataset_version") // 对应 eval/datasets/eval-set.vN.json
+  triggeredBy    String   @map("triggered_by") // manual | ci | prompt_change | model_change
+  recallAt5      Decimal? @map("recall_at5") @db.Decimal(6, 4) // 检索层 Recall@5
+  fidelity       Decimal? @db.Decimal(6, 4) // ragas 忠实度口径（LLM-as-judge）
+  citationAcc    Decimal? @map("citation_acc") @db.Decimal(6, 4) // 自建引用准确率
+  relevance      Decimal? @db.Decimal(6, 4) // 答案相关性（judge 1~5 归一化）
+  avgCost        Decimal? @map("avg_cost") @db.Decimal(10, 6)
+  avgLatencyMs   Int?     @map("avg_latency_ms")
+  totalCases     Int      @map("total_cases")
+  detail         Json? // 逐条分数供下钻 bad case
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@map("eval_runs")
+}

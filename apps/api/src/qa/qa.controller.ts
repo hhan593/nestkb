@@ -1,0 +1,106 @@
+import { Body, Controller, Get, HttpCode, HttpStatus, Inject, Param, Post, Req, Res, UseGuards } from '@nestjs/common';
+import type { FastifyReply, FastifyRequest } from 'fastify';
+import { QaSseEvent } from '@lib/contracts';
+import { TraceService } from '@app/common';
+import { CurrentUser } from '../auth/decorators/current-user.decorator';
+import type { AuthedUser } from '../auth/auth.service';
+import { AskDto, CreateConversationDto } from './dto';
+import { QaRateLimitGuard } from './qa-rate-limit.guard';
+import { QaService, QaStreamSink } from './qa.service';
+
+/**
+ * 问答（SSE 流式，计划书 7.3-④）：
+ * 事件顺序固定 meta→delta*→citations→usage→done；error 事件之后流终止。
+ * 客户端断开 → req close → AbortController → 上游 LlmModule 取消 → 部分结算。
+ */
+@Controller('qa')
+@UseGuards(QaRateLimitGuard)
+export class QaController {
+  constructor(
+    private readonly qa: QaService,
+    private readonly trace: TraceService,
+  ) {}
+
+  @Post('conversations')
+  async create(@CurrentUser() user: AuthedUser, @Body() dto?: CreateConversationDto) {
+    return this.qa.createConversation(user, dto?.title);
+  }
+
+  @Get('conversations')
+  async list(@CurrentUser() user: AuthedUser) {
+    return this.qa.listConversations(user);
+  }
+
+  @Get('conversations/:id')
+  async detail(@CurrentUser() user: AuthedUser, @Param('id') id: string) {
+    return this.qa.getConversation(user, id);
+  }
+
+  @Post('conversations/:id/messages')
+  @HttpCode(HttpStatus.OK)
+  async ask(
+    @Req() req: FastifyRequest,
+    @Res() res: FastifyReply,
+    @CurrentUser() user: AuthedUser,
+    @Param('id') conversationId: string,
+    @Body() dto: AskDto,
+  ): Promise<void> {
+    const requestId = this.trace.requestId || this.trace.newRequestId();
+    const abort = new AbortController();
+    let closed = false;
+    req.raw.on('close', () => {
+      if (!res.raw.writableEnded) {
+        closed = true;
+        abort.abort();
+      }
+    });
+
+    let metaSent = false;
+    const write = (ev: QaSseEvent): void => {
+      if (closed || res.raw.writableEnded) return;
+      res.raw.write(`event: ${ev.event}\ndata: ${JSON.stringify(ev.data)}\n\n`);
+    };
+    const sink: QaStreamSink = {
+      open: (meta) => {
+        if (metaSent) return;
+        metaSent = true;
+        res.raw.writeHead(200, {
+          'Content-Type': 'text/event-stream; charset=utf-8',
+          'Cache-Control': 'no-cache, no-transform',
+          Connection: 'keep-alive',
+          'X-Accel-Buffering': 'no',
+          'x-rerank-degraded': String(meta.retrieval.rerankDegraded),
+        });
+        write({ event: 'meta', data: meta });
+      },
+      delta: (text) => write({ event: 'delta', data: { text } }),
+      citations: (list) => write({ event: 'citations', data: { citations: list } }),
+      usage: (u) => write({ event: 'usage', data: u }),
+      done: (d) => write({ event: 'done', data: d }),
+      error: (d) => write({ event: 'error', data: d }),
+    };
+
+    try {
+      await this.qa.ask({
+        conversationId,
+        user,
+        question: dto.question,
+        topK: dto.topK,
+        requestId,
+        signal: abort.signal,
+        sink,
+      });
+    } catch (err) {
+      // 编排之外的兜底：确保客户端总能收到终止事件
+      sink.open({
+        messageId: '',
+        requestId,
+        retrieval: { topK: 0, hitCount: 0, rerankDegraded: false, latencyMs: 0 },
+      });
+      sink.error({ code: 'UPSTREAM_ERROR', message: '服务内部错误', retryable: true });
+      void err;
+    } finally {
+      res.raw.end();
+    }
+  }
+}

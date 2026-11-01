@@ -1,0 +1,11 @@
+node_modules/
+dist/
+coverage/
+.env
+.env.local
+*.log
+storage/uploads/
+tsconfig.tsbuildinfo
+*.tsbuildinfo
+.DS_Store
+dump.rdb
