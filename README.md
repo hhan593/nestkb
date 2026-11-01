@@ -4,6 +4,19 @@
 
 **一句话成品形态**：员工上传文档 → 异步摄取（解析/结构感知分块/向量化）→ 混合检索（pgvector + FTS + RRF + rerank）→ SSE 流式回答带 `[1][2]` 引用 → Token 计量落库 → 反馈与评估闭环。权限按部门/文档隔离，**权限过滤是检索层 SQL 的第一个 WHERE 条件**。
 
+## 前端界面（React SPA）
+
+`apps/web`：Vite + React 19 + TypeScript。登录 → 知识库问答（SSE 流式 + 引用卡展开 + 点赞点踩）→ 文档管理（上传/摄取进度轮询/版本历史/时效标记）→ 管理端（成本看板/检索调试/评估回归，member 不可见）。
+
+```bash
+pnpm dev          # 同时起 api + worker + web（web 在 :5173，API 代理已配好）
+pnpm build:web    # 构建产物 apps/web/dist
+```
+
+生产形态：构建产物由 **API 进程同源托管**（`/assets/*` 动态通配 + `@Get('*')` SPA 兜底路由），浏览器打开 `http://localhost:3000` 即是完整界面，无需 CORS 与额外静态服务。浏览器实测通过：流式回答、引用定位、越权隐藏、过期标记、配额条实时变化。
+
+视觉世界：公文文牍的现代转译（冷纸面 + 墨色 + 朱砂红仅用于引用与主操作），详见 `DESIGN.md`。
+
 ## 快速开始
 
 ```bash
@@ -53,7 +66,8 @@ PRICE_JSON={"model":{"input":2,"output":8},...}   # 元/百万 token，成本看
 ## 架构
 
 ```
-apps/api        HTTP 进程（Fastify + SSE）：auth / documents / qa / feedback / admin / eval / metering
+apps/web        React SPA：问答（SSE+引用）/ 文档管理 / 成本看板 / 检索调试 / 评估回归
+apps/api        HTTP 进程（Fastify + SSE）：auth / documents / qa / feedback / admin / eval / metering + SPA 托管
 apps/worker     摄取进程（BullMQ Worker，无 HTTP）：解析(md/pdf/docx) → 分块 → embedding → 入库
 libs/llm        LlmModule 门面：chat / embedding / rerank 三通路，provider 配置化，业务不直连 SDK
 libs/vector-store  VectorStore（pgvector）+ 权限 WHERE + 混合检索 RRF + rerank 超时降级

@@ -17,6 +17,7 @@ import { FeedbackModule } from './feedback/feedback.module';
 import { AdminModule } from './admin/admin.module';
 import { EvalModule } from './eval/eval.module';
 import { QueryLogModule } from './query-logs/query-log.module';
+import { WebUiModule } from './web-ui/web-ui.module';
 
 @Module({
   imports: [
@@ -38,6 +39,7 @@ import { QueryLogModule } from './query-logs/query-log.module';
     FeedbackModule,
     AdminModule,
     EvalModule,
+    WebUiModule,
   ],
   providers: [
     { provide: APP_GUARD, useClass: JwtAuthGuard }, // 全局 JWT：@Public 白名单外一律鉴权（30 篇）

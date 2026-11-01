@@ -5,7 +5,7 @@
   "private": true,
   "scripts": {
     "postinstall": "prisma generate",
-    "dev": "concurrently -n api,worker -c cyan,magenta \"pnpm dev:api\" \"pnpm dev:worker\"",
+    "dev": "concurrently -n api,worker,web -c cyan,magenta,green \"pnpm dev:api\" \"pnpm dev:worker\" \"pnpm dev:web\"",
     "dev:api": "nest start api --watch",
     "dev:worker": "nest start worker --watch",
     "build": "nest build api && nest build worker",
@@ -19,7 +19,9 @@
     "eval": "ts-node -r tsconfig-paths/register --transpile-only eval/scripts/run-eval.ts",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:e2e": "vitest run --config vitest.e2e.config.ts"
+    "test:e2e": "vitest run --config vitest.e2e.config.ts",
+    "build:web": "pnpm -C apps/web build",
+    "dev:web": "pnpm -C apps/web dev"
   },
   "dependencies": {
     "@bull-board/api": "^6.10.1",
@@ -45,7 +47,8 @@
     "pg": "^8.16.0",
     "reflect-metadata": "^0.2.2",
     "rxjs": "^7.8.2",
-    "zod": "^3.25.28"
+    "zod": "^3.25.28",
+    "@fastify/static": "^8.1.0"
   },
   "devDependencies": {
     "@nestjs/cli": "^11.0.7",
