@@ -24,7 +24,15 @@ async function bootstrap(): Promise<void> {
     limits: { fileSize: MAX_UPLOAD_BYTES, files: 1, fields: 10 },
   });
   await app.register(helmet as never, { contentSecurityPolicy: false });
-  await app.register(cors as never, { origin: true, credentials: true });
+  // CORS 白名单（CORS_ORIGINS，逗号分隔）：不再反射任意 Origin。无 Origin 头（同源/curl）放行；
+  // 白名单为空时非同源跨域一律拒绝（SPA 由 API 同源托管，默认无需跨域）
+  const env = app.get(ENV);
+  await app.register(cors as never, {
+    origin: (origin: string | undefined, cb: (err: Error | null, allow: boolean) => void) => {
+      cb(null, !origin || env.corsOrigins.includes(origin));
+    },
+    credentials: true,
+  });
 
   // 前端构建产物存在时由 API 同源托管（生产部署形态）：
   // /assets/* 用动态通配 —— rebuild 后新 hash 文件名自动可服务（wildcard:false 会在启动时固化文件路由，导致新构建 404）
@@ -49,7 +57,6 @@ async function bootstrap(): Promise<void> {
 
   await app.init();
 
-  const env = app.get(ENV);
   await app.listen(env.port, '0.0.0.0');
   console.log(
     `${new Date().toISOString()} LOG [api] listening on http://0.0.0.0:${env.port}${hasWeb ? '（含前端 SPA）' : '（仅 API）'}`,

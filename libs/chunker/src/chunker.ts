@@ -43,8 +43,12 @@ export function chunkDocument(text: string, opts: ChunkOptions = {}): ChunkDraft
 
   for (const sec of splitByHeadings(text)) {
     for (const block of groupTableBlocks(sec.body)) {
-      if (block.isTable || block.text.trim().length <= maxChars) {
-        mk(block.text, sec.heading, block.isTable);
+      if (block.isTable) {
+        // 表格按行聚合下切（保留行完整性），绝不让单个块超 maxChars —— 超长表格直通
+        // embedding 必超 token 上限，文档会永远卡在摄取失败
+        for (const piece of splitTable(block.text, maxChars)) mk(piece, sec.heading, true);
+      } else if (block.text.trim().length <= maxChars) {
+        mk(block.text, sec.heading, false);
       } else {
         for (const piece of recursiveSplit(block.text, 0, maxChars, overlap)) mk(piece, sec.heading, false);
       }
@@ -53,12 +57,36 @@ export function chunkDocument(text: string, opts: ChunkOptions = {}): ChunkDraft
   return out;
 }
 
+/** 表格下切：按行聚合到 maxChars 为止；表头（前两行：表头行 + 分隔行）在后续片重复，保证每片自含列语义 */
+export function splitTable(table: string, maxChars: number): string[] {
+  if (table.length <= maxChars) return [table];
+  const lines = table.split('\n');
+  const hasHeader = lines.length > 2 && /^\s*\|?[\s:|-]+\|?\s*$/.test(lines[1] ?? '');
+  const header = hasHeader ? [lines[0], lines[1]] : [];
+  const rest = hasHeader ? lines.slice(2) : lines;
+  const pieces: string[] = [];
+  let buf = [...header];
+  let len = header.join('\n').length;
+  const flush = (): void => {
+    if (buf.some((l) => l.trim())) pieces.push(buf.join('\n'));
+    buf = [...header];
+    len = header.join('\n').length;
+  };
+  for (const line of rest) {
+    if (buf.length > header.length && len + line.length + 1 > maxChars) flush();
+    buf.push(line);
+    len += line.length + 1;
+  }
+  flush();
+  return pieces;
+}
+
 export interface HeadingSection {
   heading: string;
   body: string;
 }
 
-/** 第一层：#/##/### 标题栈 → 章节路径 */
+/** 第一层：#/###### 标题栈 → 章节路径（DOCX h4-h6 会被解析为 ####，必须一并识别） */
 export function splitByHeadings(text: string): HeadingSection[] {
   const lines = text.split('\n');
   const sections: HeadingSection[] = [];
@@ -71,7 +99,7 @@ export function splitByHeadings(text: string): HeadingSection[] {
   };
 
   for (const line of lines) {
-    const m = line.match(/^(#{1,3})\s+(.+?)\s*$/);
+    const m = line.match(/^(#{1,6})\s+(.+?)\s*$/);
     if (m) {
       push();
       buf = [];

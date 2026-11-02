@@ -27,30 +27,39 @@ export class FeedbackService {
     const conv = await this.prisma.conversation.findUnique({ where: { id: message.conversationId } });
     if (conv?.userId !== user.userId) throw new ForbiddenException('只能反馈自己的会话消息');
 
-    const feedback = await this.prisma.feedback.create({
-      data: { messageId, userId: user.userId, rating: input.rating, reasons: input.reasons, comment: input.comment },
+    // (messageId, userId) 唯一约束 + upsert：同一用户对同一消息重复反馈按更新处理，不再无限刷
+    const feedback = await this.prisma.feedback.upsert({
+      where: { messageId_userId: { messageId, userId: user.userId } },
+      create: { messageId, userId: user.userId, rating: input.rating, reasons: input.reasons, comment: input.comment },
+      update: { rating: input.rating, reasons: input.reasons, comment: input.comment },
     });
 
     let queuedForEval = false;
     if (input.rating === 'down') {
-      // 点踩 case 回流评测集候选池（source=feedback）：question 取该回答对应的提问
+      // 点踩 case 回流评测集候选池（source=feedback）：question 取该回答对应的提问；按问题去重防污染评测集
       const userMsg = await this.prisma.message.findFirst({
         where: { conversationId: message.conversationId, role: 'user', createdAt: { lt: message.createdAt } },
         orderBy: { createdAt: 'desc' },
       });
       if (userMsg) {
-        await this.prisma.evalCase.create({
-          data: {
-            question: userMsg.content,
-            caseType: mapCaseType(input.reasons),
-            goldAnswer: null,
-            goldChunkIds: [],
-            goldMarkers: [],
-            source: 'feedback',
-            expectDeny: input.reasons.includes('not_found'),
-          },
+        const dup = await this.prisma.evalCase.findFirst({
+          where: { question: userMsg.content, source: 'feedback' },
+          select: { id: true },
         });
-        queuedForEval = true;
+        if (!dup) {
+          await this.prisma.evalCase.create({
+            data: {
+              question: userMsg.content,
+              caseType: mapCaseType(input.reasons),
+              goldAnswer: null,
+              goldChunkIds: [],
+              goldMarkers: [],
+              source: 'feedback',
+              expectDeny: input.reasons.includes('not_found'),
+            },
+          });
+          queuedForEval = true;
+        }
       }
     }
     return { feedbackId: feedback.id, queuedForEval };

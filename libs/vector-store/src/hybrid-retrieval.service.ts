@@ -82,14 +82,15 @@ export class HybridRetrievalService {
     const t0 = performance.now();
     const [queryVec, versionIds] = await Promise.all([
       this.embedding.embedQuery(query),
-      this.store.currentVersionIds(scope),
+      // 仅调试视图需要 version 集合规模；常规召回的版本/权限范围已在检索 SQL 内解析
+      opts.debug ? this.store.currentVersionIds(scope) : Promise.resolve([]),
     ]);
     const embedMs = performance.now() - t0;
 
     const t1 = performance.now();
     const [vectorHits, ftsHits] = await Promise.all([
-      this.store.searchVectors(queryVec, coarseK, scope, versionIds),
-      this.store.searchFts(query, coarseK, scope, versionIds),
+      this.store.searchVectors(queryVec, coarseK, scope),
+      this.store.searchFts(query, coarseK, scope),
     ]);
     const vectorMs = performance.now() - t1;
     const ftsMs = vectorMs; // 双路并行，共享同一段墙钟

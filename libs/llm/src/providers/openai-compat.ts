@@ -31,7 +31,9 @@ async function parseError(resp: Response): Promise<LlmUpstreamError> {
 
 /** OpenAI 兼容 /chat/completions（SSE 流式 + usage）。业务代码不直连 SDK，一切经 LlmModule 门面。 */
 export class OpenAICompatChatProvider implements LlmChatProvider {
-  constructor(private readonly cfg: ProviderConfig & { temperature: number }) {}
+  constructor(
+    private readonly cfg: ProviderConfig & { temperature: number; idleTimeoutMs?: number },
+  ) {}
 
   get model(): string {
     return this.cfg.model;
@@ -39,39 +41,41 @@ export class OpenAICompatChatProvider implements LlmChatProvider {
 
   async chatStream(messages: ChatMessage[], opts: { signal?: AbortSignal; onDelta?: (t: string) => void }): Promise<ChatStreamResult> {
     const inputChars = messages.reduce((s, m) => s + m.content.length, 0);
-    const resp = await fetch(`${this.cfg.baseUrl}/chat/completions`, {
-      method: 'POST',
-      headers: headers(this.cfg.apiKey),
-      signal: opts.signal,
-      body: JSON.stringify({
-        model: this.cfg.model,
-        messages,
-        temperature: this.cfg.temperature,
-        stream: true,
-        stream_options: { include_usage: true },
-      }),
-    }).catch((err: Error) => {
-      throw new LlmUpstreamError(`connect failed: ${err.message}`, /ECONNRESET|ETIMEDOUT|fetch failed/i.test(err.message));
-    });
-    if (!resp.ok) throw await parseError(resp);
-    if (!resp.body) throw new LlmUpstreamError('empty response body', false);
+    // 外部 signal（客户端断开）+ 流间空闲超时合成一个内部 signal：上游挂起时不能让请求永不结束
+    const idleMs = this.cfg.idleTimeoutMs ?? 120_000;
+    const controller = new AbortController();
+    const onOuterAbort = () => controller.abort();
+    opts.signal?.addEventListener('abort', onOuterAbort, { once: true });
+    let idleTimer: ReturnType<typeof setTimeout> | null = null;
+    const armIdle = (): void => {
+      if (idleTimer) clearTimeout(idleTimer);
+      idleTimer = setTimeout(() => controller.abort(), idleMs);
+    };
 
-    let content = '';
-    let usage: TokenUsage | undefined;
-    const reader = resp.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = '';
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      let nl: number;
-      while ((nl = buffer.indexOf('\n')) >= 0) {
-        const line = buffer.slice(0, nl).trim();
-        buffer = buffer.slice(nl + 1);
-        if (!line.startsWith('data:')) continue;
+    try {
+      const resp = await fetch(`${this.cfg.baseUrl}/chat/completions`, {
+        method: 'POST',
+        headers: headers(this.cfg.apiKey),
+        signal: controller.signal,
+        body: JSON.stringify({
+          model: this.cfg.model,
+          messages,
+          temperature: this.cfg.temperature,
+          stream: true,
+          stream_options: { include_usage: true },
+        }),
+      }).catch((err: Error) => {
+        throw new LlmUpstreamError(`connect failed: ${err.message}`, /ECONNRESET|ETIMEDOUT|fetch failed/i.test(err.message));
+      });
+      if (!resp.ok) throw await parseError(resp);
+      if (!resp.body) throw new LlmUpstreamError('empty response body', false);
+
+      let content = '';
+      let usage: TokenUsage | undefined;
+      const consumeLine = (line: string): void => {
+        if (!line.startsWith('data:')) return;
         const payload = line.slice(5).trim();
-        if (payload === '[DONE]') continue;
+        if (!payload || payload === '[DONE]') return;
         let json: {
           choices?: Array<{ delta?: { content?: string } }>;
           usage?: TokenUsage;
@@ -79,7 +83,7 @@ export class OpenAICompatChatProvider implements LlmChatProvider {
         try {
           json = JSON.parse(payload);
         } catch {
-          continue; // 跳过残缺行
+          return; // 跳过残缺行
         }
         const delta = json.choices?.[0]?.delta?.content;
         if (delta) {
@@ -87,11 +91,40 @@ export class OpenAICompatChatProvider implements LlmChatProvider {
           opts.onDelta?.(delta);
         }
         if (json.usage) usage = json.usage;
+      };
+
+      const reader = resp.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      armIdle();
+      for (;;) {
+        const { done, value } = await reader.read();
+        armIdle(); // 每收到一段数据重置空闲计时
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        let nl: number;
+        while ((nl = buffer.indexOf('\n')) >= 0) {
+          const line = buffer.slice(0, nl).trim();
+          buffer = buffer.slice(nl + 1);
+          consumeLine(line);
+        }
       }
+      // 终结 flush：残余 buffer（末行无换行 / [DONE] / usage 帧）不丢弃
+      buffer += decoder.decode();
+      if (buffer.trim()) consumeLine(buffer.trim());
+      // 未返回 usage 的 provider：按字符估算兜底（计费口径仍优于丢失）
+      usage ??= { prompt_tokens: estimateTokens(inputChars), completion_tokens: estimateTokens(content.length) };
+      return { content, usage };
+    } catch (err) {
+      if (opts.signal?.aborted) throw err; // 客户端断开：原样上抛
+      if (controller.signal.aborted && !controller.signal.reason) {
+        throw new LlmUpstreamError(`chat stream idle > ${idleMs}ms`, true);
+      }
+      throw err;
+    } finally {
+      if (idleTimer) clearTimeout(idleTimer);
+      opts.signal?.removeEventListener('abort', onOuterAbort);
     }
-    // 未返回 usage 的 provider：按字符估算兜底（计费口径仍优于丢失）
-    usage ??= { prompt_tokens: estimateTokens(inputChars), completion_tokens: estimateTokens(content.length) };
-    return { content, usage };
   }
 }
 
