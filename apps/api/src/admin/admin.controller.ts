@@ -6,6 +6,10 @@ import type { AuthedUser } from '../auth/auth.service';
 import { AdminService } from './admin.service';
 import { QueryLogService } from '../query-logs/query-log.service';
 import { PrismaService } from '@app/prisma';
+import { Inject } from '@nestjs/common';
+import { REDIS } from '@app/common';
+import type Redis from 'ioredis';
+import { invalidateDeptCache } from '../qa/semantic-cache.service';
 import { IsDateString, IsInt, IsOptional, IsString, Min } from 'class-validator';
 
 class UsageQueryDto {
@@ -51,6 +55,7 @@ export class AdminController {
     private readonly retrieval: HybridRetrievalService,
     private readonly queryLog: QueryLogService,
     private readonly prisma: PrismaService,
+    @Inject(REDIS) private readonly redis: Redis,
   ) {}
 
   /** 部门与用户清单（授权下拉/配额调整的数据源） */
@@ -136,6 +141,8 @@ export class AdminController {
       where: { id: doc.currentVersionId },
       data: { expiresAt: new Date(dto.expiresAt) },
     });
+    // 部门语义缓存可能引用刚过期的文档：立即失效
+    await invalidateDeptCache(this.redis, doc.departmentId);
     return { expired: true, expiresAt: dto.expiresAt };
   }
 

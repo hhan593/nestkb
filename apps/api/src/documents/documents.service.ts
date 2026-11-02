@@ -6,11 +6,15 @@ import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { ErrorCodes, INGEST_QUEUE, IngestJobData } from '@lib/contracts';
 import { AccessLevel, type Prisma } from '@prisma/client';
-import { AppEnv, ENV, TraceService } from '@app/common';
+import { AppEnv, ENV, REDIS, TraceService } from '@app/common';
+import type Redis from 'ioredis';
 import { PrismaService } from '@app/prisma';
+import { invalidateDeptCache } from '../qa/semantic-cache.service';
 import type { AuthedUser } from '../auth/auth.service';
 
 const ALLOWED_EXT = new Set(['.md', '.markdown', '.txt', '.pdf', '.docx']);
+
+type PrismaDocumentVersion = Awaited<ReturnType<Prisma.TransactionClient['documentVersion']['create']>>;
 
 export interface UploadInput {
   buffer: Buffer;
@@ -27,6 +31,7 @@ export class DocumentsService {
     private readonly prisma: PrismaService,
     @InjectQueue(INGEST_QUEUE) private readonly ingestQueue: Queue<IngestJobData>,
     @Inject(ENV) private readonly env: AppEnv,
+    @Inject(REDIS) private readonly redis: Redis,
     private readonly trace: TraceService,
   ) {}
 
@@ -89,61 +94,85 @@ export class DocumentsService {
           },
         });
 
-    const maxNo = await this.prisma.documentVersion.aggregate({
-      _max: { versionNo: true },
-      where: { documentId: doc.id },
-    });
-    const versionNo = (maxNo._max.versionNo ?? 0) + 1;
     const versionId = randomUUID();
+    let versionNo = 0;
     const storageKey = `${doc.id}/${versionId}${ext}`;
-
-    // 建版本 + 切换 current_version_id + 建摄取任务（单事务）
-    const version = await this.prisma.$transaction(async (tx) => {
-      const v = await tx.documentVersion.create({
-        data: {
-          id: versionId,
-          documentId: doc.id,
-          versionNo,
-          storageKey,
-          mimeType: input.mimetype || ext,
-          effectiveAt: new Date(),
-          expiresAt: input.expiresAt ?? null,
-          checksum,
-        },
-      });
-      await tx.document.update({ where: { id: doc.id }, data: { currentVersionId: v.id } });
-      const job = await tx.ingestionJob.create({
-        data: { documentId: doc.id, versionId: v.id, stage: 'queued' },
-      });
-      return { version: v, job };
-    });
-
     const absDir = path.join(process.cwd(), this.env.storageDir, doc.id);
+
+    // 先落盘再建库：DB 事务提交后文件必然存在，不会留下指向空文件的 current 版本
     await fs.mkdir(absDir, { recursive: true });
     await fs.writeFile(path.join(absDir, path.basename(storageKey)), input.buffer);
 
-    await this.ingestQueue.add(
-      'ingest',
-      {
-        documentId: doc.id,
-        versionId,
-        title: doc.title,
-        storageKey,
-        mimeType: version.version.mimeType,
-        contentHash: checksum,
-        deptId: user.deptId,
-        aclDeptIds: await this.buildAclDeptIds(doc.accessLevel, user.deptId, doc.id),
-        uploadedBy: user.userId,
-        requestId: this.trace.requestId,
-      } satisfies IngestJobData,
-      {
-        jobId: versionId, // 幂等键：重复投递同版本零副作用
-        attempts: 3,
-        backoff: { type: 'exponential', delay: 5000 },
-        removeOnComplete: 500,
-        removeOnFail: false, // 失败进 DLQ 供人工重放
-      },
-    );
+    // 建版本 + 切换 current_version_id + 建摄取任务（单事务）；versionNo 事务内生成，撞唯一约束重试
+    let version: { version: PrismaDocumentVersion; job: { id: string }; versionNo: number };
+    try {
+      version = await this.prisma.$transaction(async (tx) => {
+        for (let attempt = 0; ; attempt++) {
+          try {
+            const maxNo = await tx.documentVersion.aggregate({ _max: { versionNo: true }, where: { documentId: doc.id } });
+            const vNo = (maxNo._max.versionNo ?? 0) + 1;
+            const v = await tx.documentVersion.create({
+              data: {
+                id: versionId,
+                documentId: doc.id,
+                versionNo: vNo,
+                storageKey,
+                mimeType: input.mimetype || ext,
+                effectiveAt: new Date(),
+                expiresAt: input.expiresAt ?? null,
+                checksum,
+              },
+            });
+            await tx.document.update({ where: { id: doc.id }, data: { currentVersionId: v.id } });
+            const job = await tx.ingestionJob.create({
+              data: { documentId: doc.id, versionId: v.id, stage: 'queued' },
+            });
+            return { version: v, job, versionNo: vNo };
+          } catch (err) {
+            // 并发加版本撞 @@unique([documentId, versionNo])：重取 max 重试
+            if (attempt < 2 && typeof err === 'object' && err !== null && (err as { code?: string }).code === 'P2002') continue;
+            throw err;
+          }
+        }
+      });
+    } catch (err) {
+      // 事务失败：回收已落盘文件，不留孤儿
+      await fs.rm(path.join(absDir, path.basename(storageKey)), { force: true }).catch(() => undefined);
+      throw err;
+    }
+    versionNo = version.versionNo;
+
+    try {
+      await this.ingestQueue.add(
+        'ingest',
+        {
+          documentId: doc.id,
+          versionId,
+          title: doc.title,
+          storageKey,
+          mimeType: version.version.mimeType,
+          contentHash: checksum,
+          // 权限归属以文档所属部门为准（admin 可跨部门重传，不能把自己部门写进 chunk）
+          deptId: doc.departmentId,
+          aclDeptIds: await this.buildAclDeptIds(doc.accessLevel, doc.departmentId, doc.id),
+          uploadedBy: user.userId,
+          requestId: this.trace.requestId,
+        } satisfies IngestJobData,
+        {
+          jobId: versionId, // 幂等键：重复投递同版本零副作用
+          attempts: 3,
+          backoff: { type: 'exponential', delay: 5000 },
+          removeOnComplete: 500,
+          removeOnFail: false, // 失败进 DLQ 供人工重放
+        },
+      );
+    } catch (err) {
+      // 入队失败补偿：标记 failed（文件与版本都在，可人工重放），不留永久 queued 悬挂
+      await this.prisma.ingestionJob
+        .update({ where: { versionId }, data: { stage: 'failed', error: `ENQUEUE_FAILED: ${String(err).slice(0, 400)}` } })
+        .catch(() => undefined);
+      throw err;
+    }
 
     return {
       documentId: doc.id,
@@ -249,6 +278,8 @@ export class DocumentsService {
     // 先断开自引用（current_version_id → document_versions），否则级联删除时 FK 校验失败
     await this.prisma.document.update({ where: { id }, data: { currentVersionId: null } });
     await this.prisma.document.delete({ where: { id } });
+    // 部门语义缓存可能引用已删除文档：立即失效，避免 24h TTL 内继续返回旧答案
+    await invalidateDeptCache(this.redis, doc.departmentId);
     await Promise.all(
       versions.map((v) =>
         fs.rm(path.join(process.cwd(), this.env.storageDir, v.storageKey), { force: true }).catch(() => undefined),

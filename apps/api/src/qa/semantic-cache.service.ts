@@ -39,6 +39,20 @@ export class SemanticCacheService {
   async put(deptId: string, question: string, entry: CacheEntry): Promise<void> {
     await this.redis.set(this.key(deptId, question), JSON.stringify(entry), 'EX', CACHE_TTL_SEC);
   }
+
+  /** 文档删除/过期/权限回收后调用：清空该部门全部缓存，避免最长 24h 返回过期引用 */
+  async invalidateDept(deptId: string): Promise<void> {
+    await invalidateDeptCache(this.redis, deptId);
+  }
+}
+
+export async function invalidateDeptCache(redis: Redis, deptId: string): Promise<void> {
+  let cursor = '0';
+  do {
+    const [next, keys] = await redis.scan(cursor, 'MATCH', `scache:${deptId}:*`, 'COUNT', 200);
+    cursor = next;
+    if (keys.length) await redis.unlink(...keys);
+  } while (cursor !== '0');
 }
 
 function normalize(q: string): string {

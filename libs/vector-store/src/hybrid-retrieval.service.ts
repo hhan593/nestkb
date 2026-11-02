@@ -1,6 +1,6 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { RetrievedChunk } from '@lib/contracts';
-import { AppEnv, ENV } from '@app/common';
+import { AppEnv, AppLogger, ENV } from '@app/common';
 import { EmbeddingService } from '@lib/llm';
 import { RerankService } from '@lib/llm';
 import { AccessScope } from './access-filter';
@@ -72,11 +72,13 @@ export class HybridRetrievalService {
     private readonly store: VectorStoreService,
     private readonly embedding: EmbeddingService,
     private readonly reranker: RerankService,
+    private readonly logger: AppLogger,
     @Inject(ENV) private readonly env: AppEnv,
   ) {}
 
-  async retrieve(query: string, scope: AccessScope, opts: { debug?: boolean } = {}): Promise<RetrievalResult> {
+  async retrieve(query: string, scope: AccessScope, opts: { debug?: boolean; topKFinal?: number } = {}): Promise<RetrievalResult> {
     const coarseK = this.env.retrieval.topKCoarse; // 粗排池取大：rerank 的前提是"先别漏"
+    const topKFinal = opts.topKFinal ?? this.env.retrieval.topKFinal;
     const t0 = performance.now();
     const [queryVec, versionIds] = await Promise.all([
       this.embedding.embedQuery(query),
@@ -96,7 +98,7 @@ export class HybridRetrievalService {
     const coarse = rrfFuse(vectorHits, ftsHits, this.env.retrieval.rrfK).slice(0, coarseK);
     const fuseMs = performance.now() - t2;
 
-    const finalK = Math.min(this.env.retrieval.topKFinal, coarse.length);
+    const finalK = Math.min(topKFinal, coarse.length);
     let chunks: RetrievedChunk[];
     let degraded = false;
     const t3 = performance.now();
@@ -108,8 +110,9 @@ export class HybridRetrievalService {
           score: r.score,
           debug: { ...coarse[r.index].debug, rrfScore: coarse[r.index].score, rerankScore: Number(r.score.toFixed(6)) },
         }));
-      } catch {
-        // rerank 降级：x-rerank-degraded 标记 + query_logs（计划书 难点 2）
+      } catch (err) {
+        // rerank 降级：x-rerank-degraded 标记 + query_logs（计划书 难点 2）；记录原因，避免线上静默劣化无从排查
+        this.logger.warn(`rerank degraded: ${err instanceof Error ? `${err.name}: ${err.message}` : String(err)}`);
         chunks = coarse.slice(0, finalK);
         degraded = true;
       }
