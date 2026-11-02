@@ -3,8 +3,11 @@
 services:
   postgres:
     image: pgvector/pgvector:pg16
+    # 2核4G 机器的 PG 调优：小 shared_buffers + 限连接
+    command: postgres -c shared_buffers=256MB -c effective_cache_size=1536MB -c work_mem=8MB -c max_connections=100
     environment: { POSTGRES_USER: nestkb, POSTGRES_PASSWORD: nestkb, POSTGRES_DB: nestkb }
     volumes: [pgdata:/var/lib/postgresql/data]
+    mem_limit: 1g
     healthcheck:
       test: ['CMD-SHELL', 'pg_isready -U nestkb']
       interval: 5s
@@ -52,6 +55,7 @@ services:
       postgres: { condition: service_healthy }
       redis: { condition: service_healthy }
     restart: unless-stopped
+    mem_limit: 768m
 
   worker:
     build:
@@ -70,11 +74,13 @@ services:
       LLM_EMBEDDING_API_KEY: ${LLM_EMBEDDING_API_KEY:-}
       LLM_EMBEDDING_MODEL: ${LLM_EMBEDDING_MODEL:-mock-embedding}
       PRICE_JSON: ${PRICE_JSON:-{"mock-embedding":{"input":0.5}}}
+      NODE_OPTIONS: --max-old-space-size=640   # 大 PDF 解析峰值封顶，防整机 OOM
     volumes: [uploads:/data/uploads]
     depends_on:
       postgres: { condition: service_healthy }
       redis: { condition: service_healthy }
     restart: unless-stopped
+    mem_limit: 768m
 
 volumes:
   pgdata: {}

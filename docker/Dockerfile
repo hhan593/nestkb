@@ -33,7 +33,7 @@ COPY --from=build /app/dist ./dist
 COPY --from=build /app/apps/web/dist ./apps/web/dist
 COPY --from=build /app/prisma ./prisma
 COPY --from=build /app/package.json ./package.json
-COPY --from=build /app/scripts/runtime-paths.js ./scripts/runtime-paths.js
+COPY --from=build /app/scripts ./scripts
 COPY --from=build /app/libs ./libs
 COPY docker/docker-entrypoint.sh ./entrypoint.sh
 RUN chmod +x ./entrypoint.sh && mkdir -p storage/uploads

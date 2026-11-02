@@ -113,7 +113,20 @@ SSE 事件顺序固定：`meta → delta* → citations → usage → done`（er
 - **压测**：`node scripts/loadtest.js --url http://127.0.0.1:5050 --users 50 --duration 20` —— 多账号轮换 + 真实节奏（预扣配额按设计将单用户并发串行化），E4 门槛：错误率 <1%（实测 50 并发 0% 错误、P95≈150ms）
 - **资料侧消毒**：检索命中的 chunk 进入 LLM 上下文前由注入护栏净化（间接注入指令不进模型），citations 仍展示原文供人工核对（T13）
 - **CI**：GitHub Actions（`.github/workflows/ci.yml`）—— 类型检查 → 迁移 → 单测 → E2E（真实 pgvector+Redis service 容器）→ 构建 → 评估回归
-- **生产部署**：`docker compose -f docker/docker-compose.prod.yml up -d --build`（api 自动迁移并托管前端、worker 独立摄取、pgvector+redis 健康检查）
+- **生产部署**：`docker compose -f docker/docker-compose.prod.yml up -d --build`（api 自动迁移并托管前端、worker 独立摄取、pgvector+redis 健康检查）。**2核4G 云服务器即可承载**：内存分配已按小机器加固（PG 1g / api 768m / worker 768m 含堆封顶），embedding 走云 API 不占本机算力；服务器建议另加 2G swap 兜底。
+- **服务器初始化 runbook**：
+  ```bash
+  # 服务器上（装好 Docker 后）
+  git clone https://github.com/hhan593/nestkb && cd nestkb
+  # 按需配置真实模型 key：直接写 docker-compose.prod.yml 的 environment 或导出环境变量
+  docker compose -f docker/docker-compose.prod.yml up -d --build
+  # 初始化账号/评测集/语料（容器内有 ts-node，脚本已打进镜像）
+  docker compose -f docker/docker-compose.prod.yml exec api npx ts-node -r tsconfig-paths/register --transpile-only scripts/seed.ts
+  docker compose -f docker/docker-compose.prod.yml exec api npx ts-node -r tsconfig-paths/register --transpile-only scripts/seed-docs.ts
+  # 自检
+  docker compose -f docker/docker-compose.prod.yml exec api npx ts-node -r tsconfig-paths/register --transpile-only scripts/doctor.ts
+  ```
+  生产必改：`JWT_SECRET`、`PRICE_JSON`、三个 `LLM_*` 通路的 key（建议用 env 文件而非写死在 compose 里）。
 
 ## 测试与评估
 
