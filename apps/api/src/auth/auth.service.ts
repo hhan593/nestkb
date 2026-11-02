@@ -32,7 +32,7 @@ export class AuthService {
   async login(email: string, password: string): Promise<{
     accessToken: string;
     refreshToken: string;
-    user: { id: string; email: string; role: string; department: { id: string; name: string; quotaRemaining: number } };
+    user: { id: string; email: string; role: string; department: { id: string; name: string; quotaMonth: number; quotaRemaining: number } };
   }> {
     const user = await this.users.findByEmailWithDept(email);
     if (!user || !(await bcrypt.compare(password, user.passwordHash))) {
@@ -48,6 +48,7 @@ export class AuthService {
         department: {
           id: user.department.id,
           name: user.department.name,
+          quotaMonth: Number(user.department.quotaMonth),
           quotaRemaining: await this.users.quotaRemaining(user.departmentId),
         },
       },

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import { CircleAlert, FlaskConical, Play } from 'lucide-react';
+import { CircleAlert, FlaskConical, Play, Upload } from 'lucide-react';
 import { api } from '../lib/api';
 import { fmtCost, fmtTime, type EvalRun } from '../lib/types';
 
@@ -10,14 +10,31 @@ const METRIC_TARGETS: Array<{ key: keyof EvalRun; label: string; target: number;
   { key: 'relevance', label: '答案相关性', target: 0.75, fmt: (v) => (v === null ? '—' : v.toFixed(4)) },
 ];
 
+export interface EvalCaseRow {
+  id: string;
+  question: string;
+  caseType: 'fact' | 'table' | 'timeliness' | 'deny' | 'multi_hop';
+  goldAnswer: string | null;
+  goldMarkers: string[];
+  source: 'manual' | 'feedback' | 'incident';
+  expectDeny: boolean;
+  createdAt: string;
+}
+
+const SOURCE_LABEL: Record<string, string> = { manual: '人工', feedback: '点踩回流', incident: '失败专项' };
+const TYPE_LABEL: Record<string, string> = { fact: '事实', table: '表格', timeliness: '时效', deny: '拒答', multi_hop: '多跳' };
+
 export default function Eval() {
   const [runs, setRuns] = useState<EvalRun[] | null>(null);
+  const [cases, setCases] = useState<EvalCaseRow[] | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
-      setRuns(await api<EvalRun[]>('/admin/eval/runs'));
+      const [r, c] = await Promise.all([api<EvalRun[]>('/admin/eval/runs'), api<EvalCaseRow[]>('/admin/eval/cases')]);
+      setRuns(r);
+      setCases(c);
     } catch (err) {
       setError(err instanceof Error ? err.message : '加载失败');
     }
@@ -96,7 +113,7 @@ export default function Eval() {
             <div>先运行 pnpm seed 生成评测集，再点右上角「触发回归」。</div>
           </div>
         ) : runs ? (
-          <div className="card" style={{ overflow: 'hidden' }}>
+          <div className="card" style={{ overflow: 'hidden', marginBottom: 18 }}>
             <table className="table">
               <thead>
                 <tr>
@@ -131,7 +148,107 @@ export default function Eval() {
             </table>
           </div>
         ) : null}
+
+        <div className="page-head" style={{ marginBottom: 12 }}>
+          <div>
+            <h2 className="page-title" style={{ fontSize: 'var(--fs-xl)' }}>评测用例池（{cases?.length ?? 0}）</h2>
+            <p className="page-desc">三来源防过拟合：人工出题 / 点踩回流（feedback）/ 失败专项（incident）</p>
+          </div>
+          <ImportCasesButton onImported={() => void load()} />
+        </div>
+
+        {cases === null ? null : cases.length === 0 ? (
+          <div className="card card-pad empty">评测集为空：先运行 pnpm seed</div>
+        ) : (
+          <div className="card" style={{ overflow: 'hidden' }}>
+            <table className="table">
+              <thead>
+                <tr>
+                  <th>问题</th>
+                  <th>类型</th>
+                  <th>来源</th>
+                  <th>期望</th>
+                  <th>gold 标记</th>
+                </tr>
+              </thead>
+              <tbody>
+                {cases.map((c) => (
+                  <tr key={c.id}>
+                    <td style={{ maxWidth: 420 }}>
+                      {c.question}
+                      {c.goldAnswer && <div style={{ fontSize: 12, color: 'var(--ink-3)' }}>✓ {c.goldAnswer}</div>}
+                    </td>
+                    <td><span className="badge badge-neutral">{TYPE_LABEL[c.caseType]}</span></td>
+                    <td>
+                      <span className={`badge ${c.source === 'feedback' ? 'badge-warn' : c.source === 'incident' ? 'badge-err' : 'badge-info'}`}>
+                        {SOURCE_LABEL[c.source]}
+                      </span>
+                    </td>
+                    <td>{c.expectDeny ? <span className="badge badge-cinnabar">应拒答</span> : <span style={{ color: 'var(--ink-3)', fontSize: 12 }}>应命中</span>}</td>
+                    <td style={{ fontSize: 12, color: 'var(--ink-3)', maxWidth: 220 }}>
+                      {c.goldMarkers.length ? c.goldMarkers.join(' · ') : '—'}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
       </div>
     </div>
+  );
+}
+
+/** 批量导入评测用例（粘贴 JSON 数组）：question 必填，caseType/goldMarkers/expectDeny 可选 */
+function ImportCasesButton({ onImported }: { onImported: () => void }) {
+  const [open, setOpen] = useState(false);
+  const [json, setJson] = useState('');
+  const [msg, setMsg] = useState<string | null>(null);
+
+  const doImport = async () => {
+    try {
+      const cases = JSON.parse(json);
+      const res = await api<{ imported: number }>('/admin/eval/cases/import', { body: { cases } });
+      setMsg(`已导入 ${res.imported} 条`);
+      setTimeout(() => {
+        setOpen(false);
+        setMsg(null);
+        setJson('');
+        onImported();
+      }, 900);
+    } catch (err) {
+      setMsg(err instanceof Error ? err.message : '导入失败（检查 JSON 格式）');
+    }
+  };
+
+  return (
+    <>
+      <button className="btn btn-secondary" onClick={() => setOpen(true)}>
+        <Upload /> 导入用例
+      </button>
+      {open && (
+        <div className="overlay" onClick={() => setOpen(false)}>
+          <div className="dialog" style={{ width: 520 }} onClick={(e) => e.stopPropagation()}>
+            <div className="dialog-title">批量导入评测用例</div>
+            <p style={{ fontSize: 13, color: 'var(--ink-2)', margin: '-6px 0 12px' }}>
+              JSON 数组，每条：<code className="mono">{'{ "question": "...", "caseType": "fact|table|timeliness|deny", "goldMarkers": ["锚点短语"], "expectDeny": false, "source": "incident" }'}</code>
+            </p>
+            <textarea
+              className="input"
+              rows={9}
+              style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}
+              placeholder='[{"question":"公司年会抽奖规则是什么？","caseType":"fact","goldMarkers":["年会抽奖"]}]'
+              value={json}
+              onChange={(e) => setJson(e.target.value)}
+            />
+            {msg && <div style={{ fontSize: 13, marginTop: 10, color: msg.startsWith('已导入') ? 'var(--ok)' : 'var(--err)' }}>{msg}</div>}
+            <div className="dialog-foot">
+              <button className="btn btn-ghost" onClick={() => setOpen(false)}>取消</button>
+              <button className="btn btn-primary" disabled={!json.trim()} onClick={() => void doImport()}>导入</button>
+            </div>
+          </div>
+        </div>
+      )}
+    </>
   );
 }

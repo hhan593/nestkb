@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { CircleAlert, FilePlus2, FileText, History, RefreshCw, Trash2, Upload, X } from 'lucide-react';
+import { CircleAlert, CalendarClock, FilePlus2, FileText, History, KeyRound, RefreshCw, Trash2, Upload, X } from 'lucide-react';
 import { api } from '../lib/api';
 import { useAuth } from '../lib/auth';
 import {
@@ -23,8 +23,9 @@ export default function Documents() {
   const { me } = useAuth();
   const [rows, setRows] = useState<DocumentRow[] | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [uploadOpen, setUploadOpen] = useState(false);
+  const [uploadOpen, setUploadOpen] = useState<false | 'new' | 'version'>(false);
   const [detailDoc, setDetailDoc] = useState<{ doc: DocumentRow; versions: VersionDto[] } | null>(null);
+  const [grantDoc, setGrantDoc] = useState<{ doc: DocumentRow; depts: Array<{ id: string; name: string }> } | null>(null);
   const pollRef = useRef<number | null>(null);
 
   const load = useCallback(async () => {
@@ -75,6 +76,19 @@ export default function Documents() {
     setDetailDoc({ doc, versions: detail.versions });
   }, []);
 
+  const markExpired = useCallback(async (doc: DocumentRow) => {
+    const input = window.prompt('标记为过期的时间（过期后不可被检索引用）：', new Date(Date.now() + 86400_000).toISOString().slice(0, 16));
+    if (!input) return;
+    const iso = new Date(input).toISOString();
+    await api(`/admin/documents/${doc.id}/expire`, { body: { expiresAt: iso } });
+    void load();
+  }, [load]);
+
+  const openGrants = useCallback(async (doc: DocumentRow) => {
+    const depts = await api<Array<{ id: string; name: string }>>('/admin/departments');
+    setGrantDoc({ doc, depts });
+  }, []);
+
   return (
     <div className="page">
       <div className="page-inner">
@@ -83,7 +97,7 @@ export default function Documents() {
             <h1 className="page-title">文档管理</h1>
             <p className="page-desc">{me?.department.name}可见的知识库文档 · 上传后自动解析分块并向量化</p>
           </div>
-          <button className="btn btn-primary" onClick={() => setUploadOpen(true)}>
+          <button className="btn btn-primary" onClick={() => setUploadOpen('new')}>
             <Upload /> 上传文档
           </button>
         </div>
@@ -98,7 +112,7 @@ export default function Documents() {
             <div className="empty-title">知识库还是空的</div>
             <div>上传第一份 MD / PDF / DOCX 文档（≤20MB），解析分块完成后即可提问。</div>
             <div style={{ marginTop: 16 }}>
-              <button className="btn btn-primary btn-sm" onClick={() => setUploadOpen(true)}>
+              <button className="btn btn-primary btn-sm" onClick={() => setUploadOpen('new')}>
                 <Upload /> 上传文档
               </button>
             </div>
@@ -145,8 +159,14 @@ export default function Documents() {
                       <td>
                         <div style={{ display: 'flex', gap: 2, justifyContent: 'flex-end' }}>
                           <button className="icon-btn" title="版本历史" onClick={() => void openDetail(d)}><History /></button>
-                          {ing?.stage === 'failed' && me?.role === 'admin' && (
-                            <button className="icon-btn" title="重放摄取（DLQ）" onClick={() => void reingest(d)}><RefreshCw /></button>
+                          {me?.role === 'admin' && (
+                            <>
+                              <button className="icon-btn" title="标记过期" onClick={() => void markExpired(d)}><CalendarClock /></button>
+                              <button className="icon-btn" title="白名单授权" onClick={() => void openGrants(d)}><KeyRound /></button>
+                              {ing?.stage === 'failed' && (
+                                <button className="icon-btn" title="重放摄取（DLQ）" onClick={() => void reingest(d)}><RefreshCw /></button>
+                              )}
+                            </>
                           )}
                           <button className="icon-btn" title="删除" onClick={() => void remove(d)}><Trash2 /></button>
                         </div>
@@ -162,11 +182,21 @@ export default function Documents() {
 
       {uploadOpen && (
         <UploadDialog
+          versionOf={uploadOpen === 'version' ? (detailDoc?.doc ?? null) : null}
           onClose={() => setUploadOpen(false)}
           onDone={() => {
             setUploadOpen(false);
+            setDetailDoc(null);
             void load();
           }}
+        />
+      )}
+
+      {grantDoc && (
+        <GrantsDialog
+          doc={grantDoc.doc}
+          depts={grantDoc.depts}
+          onClose={() => setGrantDoc(null)}
         />
       )}
 
@@ -209,7 +239,7 @@ export default function Documents() {
   );
 }
 
-function UploadDialog({ onClose, onDone }: { onClose: () => void; onDone: () => void }) {
+function UploadDialog({ onClose, onDone, versionOf }: { onClose: () => void; onDone: () => void; versionOf: DocumentRow | null }) {
   const [file, setFile] = useState<File | null>(null);
   const [title, setTitle] = useState('');
   const [accessLevel, setAccessLevel] = useState<'department' | 'company' | 'whitelist'>('department');
@@ -228,10 +258,17 @@ function UploadDialog({ onClose, onDone }: { onClose: () => void; onDone: () => 
     try {
       const fd = new FormData();
       fd.append('file', file);
-      fd.append('title', title.trim() || file.name.replace(/\.[^.]+$/, ''));
-      fd.append('accessLevel', accessLevel);
-      if (expiresAt) fd.append('expiresAt', new Date(expiresAt).toISOString());
-      await api('/documents', { formData: fd });
+      if (versionOf) {
+        // 新版本：沿用文档标题与可见范围，仅文件与过期时间可变
+        fd.append('file', file);
+        if (expiresAt) fd.append('expiresAt', new Date(expiresAt).toISOString());
+        await api(`/documents/${versionOf.id}/versions`, { formData: fd });
+      } else {
+        fd.append('title', title.trim() || file.name.replace(/\.[^.]+$/, ''));
+        fd.append('accessLevel', accessLevel);
+        if (expiresAt) fd.append('expiresAt', new Date(expiresAt).toISOString());
+        await api('/documents', { formData: fd });
+      }
       onDone();
     } catch (err) {
       setError(err instanceof Error ? err.message : '上传失败');
@@ -243,8 +280,8 @@ function UploadDialog({ onClose, onDone }: { onClose: () => void; onDone: () => 
     <div className="overlay" onClick={onClose}>
       <div className="dialog" onClick={(e) => e.stopPropagation()}>
         <div className="dialog-title">
-          {file ? '上传新版本' : '上传文档'}
-          {file && <span style={{ fontSize: 13, color: 'var(--ink-3)', fontWeight: 400 }}>（重新上传同标题文档会生成新版本）</span>}
+          {versionOf ? `上传新版本 · 《${versionOf.title}》` : '上传文档'}
+          {file && <span style={{ fontSize: 13, color: 'var(--ink-3)', fontWeight: 400 }}>（旧版本自动下线）</span>}
         </div>
         <form
           className="dialog-form"
@@ -267,18 +304,22 @@ function UploadDialog({ onClose, onDone }: { onClose: () => void; onDone: () => 
               onChange={(e) => setFile(e.target.files?.[0] ?? null)}
             />
           </div>
-          <div>
-            <label className="field-label" htmlFor="doc-title">标题</label>
-            <input id="doc-title" className="input" value={title} onChange={(e) => setTitle(e.target.value)} placeholder="默认取文件名" />
-          </div>
-          <div>
-            <label className="field-label" htmlFor="doc-level">可见范围</label>
-            <select id="doc-level" className="select" value={accessLevel} onChange={(e) => setAccessLevel(e.target.value as typeof accessLevel)}>
-              <option value="department">部门内 —— 仅本部门可见</option>
-              <option value="company">全公司 —— 所有部门可见</option>
-              <option value="whitelist">白名单 —— 仅显式授权可检索</option>
-            </select>
-          </div>
+          {!versionOf && (
+            <div>
+              <label className="field-label" htmlFor="doc-title">标题</label>
+              <input id="doc-title" className="input" value={title} onChange={(e) => setTitle(e.target.value)} placeholder="默认取文件名" />
+            </div>
+          )}
+          {!versionOf && (
+            <div>
+              <label className="field-label" htmlFor="doc-level">可见范围</label>
+              <select id="doc-level" className="select" value={accessLevel} onChange={(e) => setAccessLevel(e.target.value as typeof accessLevel)}>
+                <option value="department">部门内 —— 仅本部门可见</option>
+                <option value="company">全公司 —— 所有部门可见</option>
+                <option value="whitelist">白名单 —— 仅显式授权可检索</option>
+              </select>
+            </div>
+          )}
           <div>
             <label className="field-label" htmlFor="doc-expire">过期时间（可选）</label>
             <input id="doc-expire" className="input" type="datetime-local" value={expiresAt} onChange={(e) => setExpiresAt(e.target.value)} />
@@ -292,6 +333,69 @@ function UploadDialog({ onClose, onDone }: { onClose: () => void; onDone: () => 
             </button>
           </div>
         </form>
+      </div>
+    </div>
+  );
+}
+
+/** 白名单授权管理：为文档追加部门级授权（用户级授权走 API），列出现有授权 */
+function GrantsDialog({ doc, depts, onClose }: { doc: DocumentRow; depts: Array<{ id: string; name: string }>; onClose: () => void }) {
+  const [deptId, setDeptId] = useState(depts[0]?.id ?? '');
+  const [expiresAt, setExpiresAt] = useState('');
+  const [grants, setGrants] = useState<Array<{ id: string; subjectType: string; subjectId: string; expiresAt: string | null }>>([]);
+  const [busy, setBusy] = useState(false);
+
+  const loadGrants = useCallback(async () => {
+    const detail = await api<{ permissions?: Array<{ id: string; subjectType: string; subjectId: string; expiresAt: string | null }> }>(`/documents/${doc.id}`);
+    setGrants(detail.permissions ?? []);
+  }, [doc.id]);
+
+  useEffect(() => {
+    void loadGrants();
+  }, [loadGrants]);
+
+  const grant = async () => {
+    if (!deptId) return;
+    setBusy(true);
+    try {
+      await api(`/admin/documents/${doc.id}/grants`, { body: { subjectType: 'dept', subjectId: deptId, expiresAt: expiresAt ? new Date(expiresAt).toISOString() : undefined } });
+      await loadGrants();
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="overlay" onClick={onClose}>
+      <div className="dialog" onClick={(e) => e.stopPropagation()}>
+        <div className="dialog-title">白名单授权 · 《{doc.title}》</div>
+        <p style={{ fontSize: 13, color: 'var(--ink-2)', margin: '-8px 0 14px' }}>whitelist 文档 default deny，显式授权后该部门/个人可检索引用。</p>
+        <div style={{ display: 'grid', gap: 10 }}>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <select className="select" style={{ flex: 1 }} value={deptId} onChange={(e) => setDeptId(e.target.value)}>
+              {depts.map((d) => (
+                <option key={d.id} value={d.id}>{d.name}</option>
+              ))}
+            </select>
+            <input className="input" style={{ width: 170 }} type="datetime-local" value={expiresAt} onChange={(e) => setExpiresAt(e.target.value)} title="授权过期时间（可选）" />
+            <button className="btn btn-primary" disabled={busy || !deptId} onClick={() => void grant()}>添加</button>
+          </div>
+          <div>
+            {grants.length === 0 && <div className="empty" style={{ padding: 18 }}>暂无授权记录</div>}
+            {grants.map((g) => (
+              <div key={g.id} className="version-item">
+                <div className="version-no">{g.subjectType === 'dept' ? '部门' : '用户'}</div>
+                <div style={{ flex: 1, fontSize: 13 }}>
+                  <span className="mono">{g.subjectId.slice(0, 8)}…</span>
+                  {g.expiresAt && <span style={{ color: 'var(--ink-3)', marginLeft: 8 }}>至 {new Date(g.expiresAt).toLocaleString('zh-CN')}</span>}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+        <div className="dialog-foot">
+          <button className="btn btn-ghost" onClick={onClose}>关闭</button>
+        </div>
       </div>
     </div>
   );

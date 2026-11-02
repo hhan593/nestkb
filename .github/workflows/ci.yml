@@ -1,0 +1,71 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: nestkb
+          POSTGRES_PASSWORD: nestkb
+          POSTGRES_DB: nestkb
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U nestkb"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports: ['6379:6379']
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      PORT: '3000'
+      JWT_SECRET: ci-secret-0123456789abcdef0123
+      DATABASE_URL: postgresql://nestkb:nestkb@localhost:5432/nestkb
+      PGVECTOR_URL: postgresql://nestkb:nestkb@localhost:5432/nestkb
+      REDIS_URL: redis://localhost:6379/0
+      STORAGE_DIR: storage/uploads
+      QA_REQUEST_LIMIT_PER_MIN: '100'
+      EVAL_JUDGE_SAMPLES: '1'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: 安装依赖
+        run: pnpm install --frozen-lockfile
+
+      - name: 类型检查
+        run: npx tsc --noEmit -p tsconfig.json
+
+      - name: 数据库迁移
+        run: npx prisma migrate deploy
+
+      - name: 种子数据
+        run: pnpm seed
+
+      - name: 单元测试
+        run: pnpm test
+
+      - name: E2E（真实 PG+Redis，mock LLM）
+        run: pnpm test:e2e
+
+      - name: 构建（api + worker + web）
+        run: pnpm build && pnpm build:web
+
+      - name: 评估回归（Recall@5 基线门槛）
+        run: pnpm eval

@@ -1,4 +1,4 @@
-import { Body, Controller, Get, HttpCode, HttpStatus, Inject, Param, Post, Req, Res, UseGuards } from '@nestjs/common';
+import { Body, Controller, Delete, Get, HttpCode, HttpStatus, Inject, Param, Post, Req, Res, UseGuards } from '@nestjs/common';
 import type { FastifyReply, FastifyRequest } from 'fastify';
 import { QaSseEvent } from '@lib/contracts';
 import { TraceService } from '@app/common';
@@ -36,6 +36,12 @@ export class QaController {
     return this.qa.getConversation(user, id);
   }
 
+  @Delete('conversations/:id')
+  async remove(@CurrentUser() user: AuthedUser, @Param('id') id: string) {
+    await this.qa.deleteConversation(user, id);
+    return { deleted: true };
+  }
+
   @Post('conversations/:id/messages')
   @HttpCode(HttpStatus.OK)
   async ask(
@@ -48,12 +54,16 @@ export class QaController {
     const requestId = this.trace.requestId || this.trace.newRequestId();
     const abort = new AbortController();
     let closed = false;
-    req.raw.on('close', () => {
-      if (!res.raw.writableEnded) {
+    // 客户端断开检测：IncomingMessage 的 close 在 Node16+ 语义多变，socket 级 + aborted 双保险
+    const onDisconnect = (): void => {
+      if (!res.raw.writableEnded && !closed) {
         closed = true;
         abort.abort();
       }
-    });
+    };
+    req.raw.on('close', onDisconnect);
+    req.raw.on('aborted', onDisconnect);
+    req.socket.on('close', onDisconnect);
 
     let metaSent = false;
     const write = (ev: QaSseEvent): void => {

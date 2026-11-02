@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ArrowUp, MessageSquarePlus, Square, ThumbsDown, ThumbsUp, FileSearch, CircleAlert } from 'lucide-react';
+import { ArrowUp, MessageSquarePlus, Square, ThumbsDown, ThumbsUp, FileSearch, CircleAlert, X } from 'lucide-react';
 import { api, apiStream } from '../lib/api';
 import { parseSseStream } from '../lib/sse';
 import { useAuth } from '../lib/auth';
+import { parseBlocks, renderInline } from '../components/markdown';
 
 import {
   fmtCost,
@@ -66,11 +67,16 @@ export default function Chat() {
     void loadConvs();
   }, [loadConvs]);
 
+  const activeConvRef = useRef<string | null>(null);
+
   const openConv = useCallback(async (id: string) => {
+    activeConvRef.current = id;
     setActiveConv(id);
+    setMessages([]); // 立即清空，避免上一会话内容残留到加载完成后突然替换（闪屏）
     setConvLoading(true);
     try {
       const detail = await api<{ messages: MessageDto[] }>(`/qa/conversations/${id}`);
+      if (activeConvRef.current !== id) return; // 已切换到其他会话，丢弃过期响应
       setMessages(
         detail.messages
           .filter((m) => m.content !== '' || m.role === 'user')
@@ -85,7 +91,7 @@ export default function Chat() {
           })),
       );
     } finally {
-      setConvLoading(false);
+      if (activeConvRef.current === id) setConvLoading(false);
     }
   }, []);
 
@@ -93,9 +99,19 @@ export default function Chat() {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight });
   }, [messages]);
 
+  const removeConv = useCallback(async (id: string) => {
+    await api(`/qa/conversations/${id}`, { method: 'DELETE' });
+    if (activeConv === id) {
+      setActiveConv(null);
+      setMessages([]);
+    }
+    void loadConvs();
+  }, [activeConv, loadConvs]);
+
   const newConv = useCallback(async () => {
     const conv = await api<Conversation>('/qa/conversations', { body: {} });
     await loadConvs();
+    activeConvRef.current = conv.id;
     setActiveConv(conv.id);
     setMessages([]);
   }, [loadConvs]);
@@ -107,6 +123,7 @@ export default function Chat() {
     if (!convId) {
       const conv = await api<Conversation>('/qa/conversations', { body: {} });
       await loadConvs();
+      activeConvRef.current = conv.id;
       setActiveConv(conv.id);
       convId = conv.id;
     }
@@ -186,9 +203,14 @@ export default function Chat() {
         <div className="conv-scroll">
           {convs.length === 0 && <div style={{ fontSize: 12, color: 'var(--ink-3)', textAlign: 'center', padding: 16 }}>还没有会话</div>}
           {convs.map((c) => (
-            <button key={c.id} className={`conv-item${c.id === activeConv ? ' active' : ''}`} onClick={() => void openConv(c.id)}>
-              {c.title || '新会话'}
-            </button>
+            <div key={c.id} className={`conv-item-row${c.id === activeConv ? ' active' : ''}`}>
+              <button className={`conv-item${c.id === activeConv ? ' active' : ''}`} onClick={() => void openConv(c.id)}>
+                {c.title || '新会话'}
+              </button>
+              <button className="icon-btn conv-del" title="删除会话" onClick={() => void removeConv(c.id)}>
+                <X />
+              </button>
+            </div>
           ))}
         </div>
       </aside>
@@ -319,28 +341,70 @@ function MessageView({ m, fb, onFeedback }: { m: LiveMessage; fb?: 'up' | 'down'
   );
 }
 
-/** 把回答文本按 [n] 引用编号切分，编号渲染为可点朱砂上标 */
+/** 回答渲染：轻量 Markdown 块级（标题/列表/表格/代码）+ [n] 引用上标点击定位 */
 function AnswerText({ content, citations, streaming }: { content: string; citations: CitationDto[]; streaming: boolean }) {
-  const parts = useMemo(() => content.split(/(\[\d{1,2}\])/g), [content]);
+  const blocks = useMemo(() => parseBlocks(content), [content]);
+  const refs = useMemo(
+    () => ({
+      maxRef: citations.length,
+      ref: (n: number, key: string) => (
+        <span
+          key={key}
+          className="ref-sup"
+          title={`《${citations[n - 1].title}》 ${citations[n - 1].headingPath}`}
+          onClick={() => document.getElementById(`cite-${n}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' })}
+        >
+          {n}
+        </span>
+      ),
+    }),
+    [citations],
+  );
   return (
-    <div className="msg-answer">
-      {parts.map((p, i) => {
-        const ref = p.match(/^\[(\d{1,2})\]$/);
-        if (ref) {
-          const n = Number(ref[1]);
-          const exists = n >= 1 && n <= citations.length;
-          return (
-            <span
-              key={i}
-              className="ref-sup"
-              title={exists ? `《${citations[n - 1].title}》 ${citations[n - 1].headingPath}` : '该编号不在本次引用列表中'}
-              onClick={() => document.getElementById(`cite-${n}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' })}
-            >
-              {n}
-            </span>
-          );
+    <div className="msg-answer md-answer">
+      {blocks.map((b, bi) => {
+        const key = `b-${bi}`;
+        switch (b.kind) {
+          case 'heading': {
+            const Tag = `h${b.level}` as 'h1';
+            return <Tag key={key}>{renderInline(b.text, refs, key)}</Tag>;
+          }
+          case 'ul':
+            return (
+              <ul key={key}>
+                {b.items.map((it, ii) => (
+                  <li key={ii}>{renderInline(it, refs, `${key}-${ii}`)}</li>
+                ))}
+              </ul>
+            );
+          case 'ol':
+            return (
+              <ol key={key}>
+                {b.items.map((it, ii) => (
+                  <li key={ii}>{renderInline(it, refs, `${key}-${ii}`)}</li>
+                ))}
+              </ol>
+            );
+          case 'table':
+            return (
+              <table key={key}>
+                <thead>
+                  <tr>{b.header.map((h, hi) => <th key={hi}>{renderInline(h, undefined, `${key}-h-${hi}`)}</th>)}</tr>
+                </thead>
+                <tbody>
+                  {b.rows.map((row, ri) => (
+                    <tr key={ri}>{row.map((c, ci) => <td key={ci}>{renderInline(c, refs, `${key}-${ri}-${ci}`)}</td>)}</tr>
+                  ))}
+                </tbody>
+              </table>
+            );
+          case 'code':
+            return <pre key={key}>{b.text}</pre>;
+          case 'quote':
+            return <blockquote key={key}>{renderInline(b.text, refs, key)}</blockquote>;
+          default:
+            return <p key={key}>{renderInline(b.text, refs, key)}</p>;
         }
-        return <span key={i}>{p}</span>;
       })}
       {streaming && <span className="stream-cursor" />}
     </div>

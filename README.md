@@ -13,7 +13,7 @@ pnpm dev          # 同时起 api + worker + web（web 在 :5173，API 代理已
 pnpm build:web    # 构建产物 apps/web/dist
 ```
 
-生产形态：构建产物由 **API 进程同源托管**（`/assets/*` 动态通配 + `@Get('*')` SPA 兜底路由），浏览器打开 `http://localhost:3000` 即是完整界面，无需 CORS 与额外静态服务。浏览器实测通过：流式回答、引用定位、越权隐藏、过期标记、配额条实时变化。
+生产形态：构建产物由 **API 进程同源托管**（`/assets/*` 动态通配 + `@Get('*')` SPA 兜底路由，客户端路由挂 `/kb` 前缀避让 API 路径空间），浏览器打开 `http://localhost:3000/kb` 即是完整界面。浏览器实测通过：流式回答、引用定位、越权隐藏、过期标记、配额条实时变化、会话删除、授权管理。
 
 视觉世界：公文文牍的现代转译（冷纸面 + 墨色 + 朱砂红仅用于引用与主操作），详见 `DESIGN.md`。
 
@@ -105,6 +105,15 @@ POST /admin/documents/:id/expire | /admin/departments/:id/quota | /admin/documen
 ```
 
 SSE 事件顺序固定：`meta → delta* → citations → usage → done`（error 之后流终止）。失败分支：`NO_EVIDENCE`（真没有依据）/ `QUOTA_EXCEEDED`（部门月配额耗尽，降级只读检索）/ `UPSTREAM_ERROR`（可重试）。响应头 `x-rerank-degraded: true` 表示 rerank 超时降级为 RRF 粗排。
+
+## 治理与运维
+
+- **文档治理**（admin）：标记过期（到期不可召回）、白名单授权（部门级/用户级，带过期时间，default deny）、调整部门月预算、失败摄取重放
+- **评测用例池**：三来源（人工/点踩回流/失败专项）可视化管理 + JSON 批量导入
+- **压测**：`node scripts/loadtest.js --url http://127.0.0.1:5050 --users 50 --duration 20` —— 多账号轮换 + 真实节奏（预扣配额按设计将单用户并发串行化），E4 门槛：错误率 <1%（实测 50 并发 0% 错误、P95≈150ms）
+- **资料侧消毒**：检索命中的 chunk 进入 LLM 上下文前由注入护栏净化（间接注入指令不进模型），citations 仍展示原文供人工核对（T13）
+- **CI**：GitHub Actions（`.github/workflows/ci.yml`）—— 类型检查 → 迁移 → 单测 → E2E（真实 pgvector+Redis service 容器）→ 构建 → 评估回归
+- **生产部署**：`docker compose -f docker/docker-compose.prod.yml up -d --build`（api 自动迁移并托管前端、worker 独立摄取、pgvector+redis 健康检查）
 
 ## 测试与评估
 

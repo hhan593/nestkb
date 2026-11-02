@@ -15,7 +15,7 @@ const root = ReactDOM.createRoot(document.getElementById('root')!);
 window.__boot.push('root-created');
 root.render(
   <React.StrictMode>
-    <BrowserRouter>
+    <BrowserRouter basename="/kb">
       <AuthProvider>
         <ErrorBoundary>
           <App />

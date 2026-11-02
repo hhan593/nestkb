@@ -158,7 +158,7 @@ export class DocumentsService {
   async list(user: AuthedUser, query: { page: number; pageSize: number }) {
     const where: Prisma.DocumentWhereInput = {
       status: 'active',
-      OR: visibleOr(user),
+      ...visibilityOf(user),
     };
     const [total, rows] = await this.prisma.$transaction([
       this.prisma.document.count({ where }),
@@ -205,7 +205,7 @@ export class DocumentsService {
 
   async detail(user: AuthedUser, id: string) {
     const doc = await this.prisma.document.findFirst({
-      where: { id, status: 'active', OR: visibleOr(user) },
+      where: { id, status: 'active', ...visibilityOf(user) },
       include: {
         versions: { orderBy: { versionNo: 'desc' }, include: { ingestionJob: true } },
         currentVersion: { include: { ingestionJob: true } },
@@ -219,6 +219,13 @@ export class DocumentsService {
       title: doc.title,
       accessLevel: doc.accessLevel,
       departmentName: doc.department.name,
+      permissions: doc.permissions.map((p) => ({
+        id: p.id,
+        subjectType: p.subjectType,
+        subjectId: p.subjectId,
+        effect: p.effect,
+        expiresAt: p.expiresAt?.toISOString() ?? null,
+      })),
       versions: doc.versions.map((v) => ({
         id: v.id,
         versionNo: v.versionNo,
@@ -252,7 +259,7 @@ export class DocumentsService {
   /** 摄取状态：stage/进度/chunkCount/error/stageDurationsMs（计划书 7.3-③） */
   async ingestionStatus(user: AuthedUser, id: string) {
     const doc = await this.prisma.document.findFirst({
-      where: { id, OR: visibleOr(user) },
+      where: { id, ...visibilityOf(user) },
       include: { currentVersion: { include: { ingestionJob: true } } },
     });
     if (!doc?.currentVersion?.ingestionJob) throw new NotFoundException('文档或摄取任务不存在');
@@ -340,10 +347,12 @@ export class DocumentsService {
   }
 }
 
-/** 可见性 OR 条件：company / 本部门 department / whitelist 显式授权（含用户级），default deny */
-export function visibleOr(user: AuthedUser): Array<Record<string, unknown>> {
+/** 可见性 OR 条件：company / 本部门 department / whitelist 显式授权（含用户级），default deny。
+ * admin 直通（全量可见）—— 管理端与治理操作不受白名单过滤影响。 */
+export function visibilityOf(user: AuthedUser): Prisma.DocumentWhereInput {
+  if (user.role === 'admin') return {}; // admin 直通（不能用 OR:[{}]，Prisma 会丢弃空对象分支）
   const now = new Date();
-  return [
+  return { OR: [
     { accessLevel: 'company' as const },
     { accessLevel: 'department' as const, departmentId: user.deptId },
     {
@@ -363,5 +372,5 @@ export function visibleOr(user: AuthedUser): Array<Record<string, unknown>> {
         },
       },
     },
-  ];
+  ] };
 }

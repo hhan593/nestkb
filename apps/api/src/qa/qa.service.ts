@@ -13,6 +13,7 @@ import {
   compressHistory,
   validateCitations,
   isHardBlockedInput,
+  sanitizeChunkContent,
 } from '@lib/prompts';
 import { AccessScope, HybridRetrievalService, RetrievalResult } from '@lib/vector-store';
 import { LlmChatService } from '@lib/llm';
@@ -73,6 +74,12 @@ export class QaService {
       orderBy: { updatedAt: 'desc' },
       select: { id: true, title: true, createdAt: true, updatedAt: true },
     });
+  }
+
+  async deleteConversation(user: AuthedUser, id: string): Promise<void> {
+    const conv = await this.prisma.conversation.findFirst({ where: { id, userId: user.userId } });
+    if (!conv) throw new NotFoundException('会话不存在');
+    await this.prisma.conversation.delete({ where: { id } }); // messages 级联
   }
 
   async getConversation(user: AuthedUser, id: string) {
@@ -208,6 +215,17 @@ export class QaService {
       return;
     }
 
+    // ── 资料侧消毒：LLM 上下文用净化版（间接注入的指令不进模型），citations 仍引用原文供人工核对
+    const interceptedChunks: string[] = [];
+    const chunksForPrompt = chunks.map((c) => {
+      const { content, intercepted } = sanitizeChunkContent(c.content);
+      if (intercepted) interceptedChunks.push(c.chunkId);
+      return { ...c, content };
+    });
+    if (interceptedChunks.length) {
+      this.logger.warn(`injection intercepted in retrieved chunks: ${interceptedChunks.join(',')}`);
+    }
+
     // ── 落库 user 消息 + assistant 占位（引用/快照在结算时回填）
     await this.prisma.message.create({ data: { conversationId: conv.id, role: 'user', content: question } });
     await this.prisma.message.create({ data: { id: messageId, conversationId: conv.id, role: 'assistant', content: '' } });
@@ -215,7 +233,7 @@ export class QaService {
     // ── 历史与多轮压缩（超 HISTORY_MAX_TURNS 轮摘要化，稳定前缀 KV-cache 友好）
     const { history, summary } = await this.loadHistory(conv.id, conv.summary, user);
 
-    const messages = buildRagPrompt(question, chunks, history, summary);
+    const messages = buildRagPrompt(question, chunksForPrompt, history, summary);
     const snapshot = {
       topK,
       hitCount,
@@ -241,6 +259,7 @@ export class QaService {
           sink.delta(t);
         },
       });
+      // 引用校验用原始 chunks（编号/原文对应），消毒只影响 LLM 上下文
       const { answer, citations } = validateCitations(streamResult.content, chunks, (w) => this.logger.warn(w));
       const settle = await this.metering.settle({
         userId: user.userId,

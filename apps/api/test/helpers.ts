@@ -43,18 +43,18 @@ export interface UploadedDoc {
 export async function uploadDoc(
   app: string,
   token: string,
-  opts: { title: string; accessLevel?: string; content: string; filename?: string },
+  opts: { title: string; accessLevel?: string; content: string; filename?: string; expiresAt?: string },
 ): Promise<UploadedDoc> {
-  const res = await request(app)
+  const req = request(app)
     .post('/documents')
     .set('Authorization', `Bearer ${token}`)
     .field('title', opts.title)
-    .field('accessLevel', opts.accessLevel ?? 'company')
-    .attach('file', Buffer.from(opts.content, 'utf8'), {
-      filename: opts.filename ?? 'doc.md',
-      contentType: 'text/markdown',
-    })
-    .expect(202);
+    .field('accessLevel', opts.accessLevel ?? 'company');
+  if (opts.expiresAt) req.field('expiresAt', opts.expiresAt);
+  const res = await req.attach('file', Buffer.from(opts.content, 'utf8'), {
+    filename: opts.filename ?? 'doc.md',
+    contentType: 'text/markdown',
+  }).expect(202);
   return unwrap(res.body) as UploadedDoc;
 }
 

@@ -1,0 +1,82 @@
+# 生产编排：docker compose -f docker/docker-compose.prod.yml up -d --build
+# api 负责迁移（entrypoint 内 migrate deploy）后监听 3000 并托管前端；worker 独立摄取进程
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment: { POSTGRES_USER: nestkb, POSTGRES_PASSWORD: nestkb, POSTGRES_DB: nestkb }
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U nestkb']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    volumes: [redisdata:/data]
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    command: ['api']
+    ports: ['3000:3000']
+    environment:
+      PORT: '3000'
+      NODE_ENV: production
+      JWT_SECRET: ${JWT_SECRET:-change-me-to-32-bytes-random-value!}
+      DATABASE_URL: postgresql://nestkb:nestkb@postgres:5432/nestkb
+      PGVECTOR_URL: postgresql://nestkb:nestkb@postgres:5432/nestkb
+      REDIS_URL: redis://redis:6379/0
+      STORAGE_DIR: /data/uploads
+      LLM_CHAT_PROVIDER: ${LLM_CHAT_PROVIDER:-mock}
+      LLM_CHAT_BASE_URL: ${LLM_CHAT_BASE_URL:-}
+      LLM_CHAT_API_KEY: ${LLM_CHAT_API_KEY:-}
+      LLM_CHAT_MODEL: ${LLM_CHAT_MODEL:-mock-chat}
+      LLM_EMBEDDING_PROVIDER: ${LLM_EMBEDDING_PROVIDER:-mock}
+      LLM_EMBEDDING_BASE_URL: ${LLM_EMBEDDING_BASE_URL:-}
+      LLM_EMBEDDING_API_KEY: ${LLM_EMBEDDING_API_KEY:-}
+      LLM_EMBEDDING_MODEL: ${LLM_EMBEDDING_MODEL:-mock-embedding}
+      LLM_RERANK_PROVIDER: ${LLM_RERANK_PROVIDER:-mock}
+      LLM_RERANK_BASE_URL: ${LLM_RERANK_BASE_URL:-}
+      LLM_RERANK_API_KEY: ${LLM_RERANK_API_KEY:-}
+      LLM_RERANK_MODEL: ${LLM_RERANK_MODEL:-mock-reranker}
+      PRICE_JSON: ${PRICE_JSON:-{"mock-chat":{"input":2,"output":8},"mock-embedding":{"input":0.5},"mock-reranker":{"per_call":0.001}}}
+    volumes: [uploads:/data/uploads]
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    command: ['worker']
+    environment:
+      NODE_ENV: production
+      JWT_SECRET: ${JWT_SECRET:-change-me-to-32-bytes-random-value!}
+      DATABASE_URL: postgresql://nestkb:nestkb@postgres:5432/nestkb
+      PGVECTOR_URL: postgresql://nestkb:nestkb@postgres:5432/nestkb
+      REDIS_URL: redis://redis:6379/0
+      STORAGE_DIR: /data/uploads
+      LLM_CHAT_PROVIDER: ${LLM_CHAT_PROVIDER:-mock}
+      LLM_EMBEDDING_PROVIDER: ${LLM_EMBEDDING_PROVIDER:-mock}
+      LLM_EMBEDDING_API_KEY: ${LLM_EMBEDDING_API_KEY:-}
+      LLM_EMBEDDING_MODEL: ${LLM_EMBEDDING_MODEL:-mock-embedding}
+      PRICE_JSON: ${PRICE_JSON:-{"mock-embedding":{"input":0.5}}}
+    volumes: [uploads:/data/uploads]
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    restart: unless-stopped
+
+volumes:
+  pgdata: {}
+  redisdata: {}
+  uploads: {}

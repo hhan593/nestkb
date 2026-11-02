@@ -78,7 +78,9 @@ interface MaterialBlock {
 
 function parseMaterials(userContent: string): MaterialBlock[] {
   if (!userContent.includes('【参考资料】')) return [];
-  const material = userContent.split('【参考资料】')[1]?.split('【问题】')[0] ?? '';
+  // material 以 \n 开头（buildRagPrompt 的模板换行）—— trim 后首块才能被 ^[n] 匹配，
+  // 否则第一块永远解析失败（表现为单块检索时 mock 拒答、citations 恒空）
+  const material = (userContent.split('【参考资料】')[1]?.split('【问题】')[0] ?? '').trim();
   const blocks = material.split(/\n\n---\n\n/);
   const out: MaterialBlock[] = [];
   for (const b of blocks) {
@@ -119,12 +121,13 @@ export class MockChatProvider implements LlmChatProvider {
 
     const promptTokens = estimateTokens(messages.reduce((s, m) => s + m.content.length, 0));
 
-    // 模拟流式：按小片下发
+    // 模拟流式：按小片下发（MOCK_STREAM_DELAY_MS 运行时覆盖 —— E2E 中途断开用例的窗口）
     const chunkSize = 12;
+    const delay = Number(process.env.MOCK_STREAM_DELAY_MS ?? this.env.mockStreamDelayMs);
     for (let i = 0; i < answer.length; i += chunkSize) {
       if (opts.signal?.aborted) throw new DOMException('aborted', 'AbortError');
       opts.onDelta?.(answer.slice(i, i + chunkSize));
-      if (this.env.mockStreamDelayMs > 0) await sleep(this.env.mockStreamDelayMs);
+      if (delay > 0) await sleep(delay);
     }
     return {
       content: answer,
@@ -187,6 +190,8 @@ export class MockRerankProvider implements RerankProvider {
 
   async rerank(query: string, documents: string[], topN: number): Promise<Array<{ index: number; score: number }>> {
     void this.env;
+    // 故障注入开关（E2E T08 降级演练用）：设 LLM_RERANK_FAIL=1 后每次调用抛错 → HybridRetrieval 降级 RRF
+    if (process.env.LLM_RERANK_FAIL === '1') throw new LlmUpstreamError('mock rerank: injected failure', false);
     if (query.length === 0) throw new LlmUpstreamError('mock rerank: empty query', false);
     return documents
       .map((d, index) => ({ index, score: Number(coverage(query, d).toFixed(4)) }))

@@ -53,6 +53,21 @@ export class AdminController {
     private readonly prisma: PrismaService,
   ) {}
 
+  /** 部门与用户清单（授权下拉/配额调整的数据源） */
+  @Get('departments')
+  async departments() {
+    const depts = await this.prisma.department.findMany({ select: { id: true, name: true, quotaMonth: true } });
+    return depts.map((d) => ({ ...d, quotaMonth: Number(d.quotaMonth) }));
+  }
+
+  @Get('users')
+  async users() {
+    const users = await this.prisma.user.findMany({
+      select: { id: true, email: true, role: true, department: { select: { name: true } } },
+    });
+    return users;
+  }
+
   @Get('usage/summary')
   async usageSummary(@Query() q: UsageQueryDto) {
     const dim = q.dim ?? 'dept';
