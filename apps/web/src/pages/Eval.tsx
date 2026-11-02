@@ -204,8 +204,11 @@ function ImportCasesButton({ onImported }: { onImported: () => void }) {
   const [open, setOpen] = useState(false);
   const [json, setJson] = useState('');
   const [msg, setMsg] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
 
   const doImport = async () => {
+    if (busy) return;
+    setBusy(true);
     try {
       const cases = JSON.parse(json);
       const res = await api<{ imported: number }>('/admin/eval/cases/import', { body: { cases } });
@@ -218,6 +221,8 @@ function ImportCasesButton({ onImported }: { onImported: () => void }) {
       }, 900);
     } catch (err) {
       setMsg(err instanceof Error ? err.message : '导入失败（检查 JSON 格式）');
+    } finally {
+      setBusy(false);
     }
   };
 
@@ -244,7 +249,7 @@ function ImportCasesButton({ onImported }: { onImported: () => void }) {
             {msg && <div style={{ fontSize: 13, marginTop: 10, color: msg.startsWith('已导入') ? 'var(--ok)' : 'var(--err)' }}>{msg}</div>}
             <div className="dialog-foot">
               <button className="btn btn-ghost" onClick={() => setOpen(false)}>取消</button>
-              <button className="btn btn-primary" disabled={!json.trim()} onClick={() => void doImport()}>导入</button>
+              <button className="btn btn-primary" disabled={!json.trim() || busy} onClick={() => void doImport()}>{busy ? '导入中…' : '导入'}</button>
             </div>
           </div>
         </div>

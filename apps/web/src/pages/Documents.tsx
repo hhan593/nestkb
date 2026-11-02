@@ -260,7 +260,6 @@ function UploadDialog({ onClose, onDone, versionOf }: { onClose: () => void; onD
       fd.append('file', file);
       if (versionOf) {
         // 新版本：沿用文档标题与可见范围，仅文件与过期时间可变
-        fd.append('file', file);
         if (expiresAt) fd.append('expiresAt', new Date(expiresAt).toISOString());
         await api(`/documents/${versionOf.id}/versions`, { formData: fd });
       } else {

@@ -14,6 +14,9 @@ export interface Me {
   department: { id: string; name: string; quotaMonth: number; quotaRemaining: number };
 }
 
+/** 刷新彻底失败（token 确认失效）时广播，AuthContext 监听后在路由内跳登录页 */
+export const UNAUTHORIZED_EVENT = 'nestkb:unauthorized';
+
 export function loadTokens(): Tokens | null {
   try {
     const raw = localStorage.getItem(TOKEN_KEY);
@@ -48,7 +51,12 @@ async function refreshTokens(): Promise<Tokens | null> {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ refreshToken: cur.refreshToken }),
   });
-  if (!res.ok) return null;
+  if (!res.ok) {
+    // 其他标签页可能已用更新的 refreshToken 完成轮换；若本地 token 已被别处替换，直接采用
+    const now = loadTokens();
+    if (now && now.refreshToken !== cur.refreshToken) return now;
+    return null;
+  }
   const body = (await res.json()) as { code: number; data?: { accessToken: string; refreshToken: string } };
   if (body.code !== 0 || !body.data) return null;
   const next: Tokens = body.data;
@@ -77,8 +85,13 @@ export async function api<T = unknown>(
     });
     const next = await refreshing;
     if (next) return api<T>(path, { ...opts, retry: false });
+    // 刷新失败但本地 token 已被其他标签页轮换 → 用新 token 重放，而不是误杀登录态
+    const now = loadTokens();
+    if (now && now.refreshToken !== tokens.refreshToken) {
+      return api<T>(path, { ...opts, retry: false });
+    }
     saveTokens(null);
-    window.location.href = '/login';
+    window.dispatchEvent(new CustomEvent(UNAUTHORIZED_EVENT));
     throw new ApiError(401, 'UNAUTHORIZED', '登录已过期，请重新登录');
   }
 
