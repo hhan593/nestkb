@@ -12,7 +12,11 @@ export interface InjectionScanResult {
 const INJECTION_PATTERNS: Array<{ name: string; re: RegExp }> = [
   { name: 'ignore-previous', re: /ignore\s+(all\s+)?(previous|prior|above)\s+instructions?/i },
   { name: '忽略指令', re: /忽略(以上|之前|上面|先前|所有)?(的)?(系统)?指令|无视(以上|之前|上面)?(的)?(系统)?指令/ },
-  { name: 'system-prompt-override', re: /(system\s*prompt|系统提示词?|系统指令)/i },
+  // 要求指令式动作（忽略/输出/泄露），单纯提到"系统提示"的正常文档内容不算
+  {
+    name: 'system-prompt-override',
+    re: /(忽略|无视|覆盖|泄露|输出|打印|复述|告诉我)[^.\n]{0,24}(system\s*prompt|系统提示词?|系统指令)|(system\s*prompt|系统提示词?|系统指令)[^.\n]{0,12}(覆盖|重写|无效)/i,
+  },
   { name: 'role-override', re: /(you\s+are\s+now|从现在开始你(是|扮演))\s*(a|an|一个新的?|丹)?/i },
   { name: 'reveal-instructions', re: /(输出|打印|复述|reveal|print|repeat)\s*(你的)?(system|系统|初始|原始)?(prompt|指令|提示词)/i },
   { name: 'jailbreak', re: /DAN\s*mode|jailbreak|越狱模式/i },
@@ -40,11 +44,18 @@ export function sanitizeChunkContent(content: string): { content: string; interc
   const lines = content.split('\n');
   let intercepted = false;
   const cleaned = lines.map((line) => {
-    if (detectInjection(line).hit) {
-      intercepted = true;
-      return INTERCEPT_MARK;
+    let out = line;
+    let hit = false;
+    // 应用全部命中的模式（不只是第一个），只替换命中短语不整行销毁：
+    // 正文其余部分（可能是正常制度条款）保留给模型
+    for (const p of INJECTION_PATTERNS) {
+      if (p.re.test(out)) {
+        hit = true;
+        out = out.replace(p.re, INTERCEPT_MARK);
+      }
     }
-    return line;
+    if (hit) intercepted = true;
+    return out;
   });
   return { content: intercepted ? cleaned.join('\n') : content, intercepted };
 }

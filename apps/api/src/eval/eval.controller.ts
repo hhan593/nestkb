@@ -1,4 +1,4 @@
-import { BadRequestException, Body, Controller, Get, Param, Post } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Get, Param, Post, Query } from '@nestjs/common';
 import { Roles } from '../auth/guards/roles.guard';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import type { AuthedUser } from '../auth/auth.service';
@@ -62,7 +62,7 @@ export class EvalController {
 
   /** 点踩回流候选池列表（W5 每周回流入口） */
   @Get('cases')
-  async cases(@Param('source') source?: string) {
+  async cases(@Query('source') source?: string) {
     return this.prisma.evalCase.findMany({
       where: source ? { source: source as 'manual' | 'feedback' | 'incident' } : undefined,
       orderBy: { createdAt: 'desc' },

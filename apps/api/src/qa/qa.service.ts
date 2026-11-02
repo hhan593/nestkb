@@ -23,6 +23,7 @@ import type { Message, Prisma } from '@prisma/client';
 import { MeteringService } from '../metering/metering.service';
 import { QueryLogService } from '../query-logs/query-log.service';
 import { SemanticCacheService } from './semantic-cache.service';
+import { visibilityOf } from '../documents/documents.service';
 import type { AuthedUser } from '../auth/auth.service';
 
 /** SSE 下发接口：Controller 实现（写头 + write 事件），顺序固定 meta→delta*→citations→usage→done */
@@ -83,16 +84,18 @@ export class QaService {
   }
 
   async getConversation(user: AuthedUser, id: string) {
+    // 会话详情倒序取最近 500 条再反转，避免超长会话全量载入内存
     const conv = await this.prisma.conversation.findFirst({
       where: { id, userId: user.userId },
-      include: { messages: { orderBy: { createdAt: 'asc' } } },
+      include: { messages: { orderBy: { createdAt: 'desc' }, take: 500 } },
     });
     if (!conv) throw new NotFoundException('会话不存在');
+    const messages = [...conv.messages].reverse();
     return {
       id: conv.id,
       title: conv.title,
       summary: conv.summary,
-      messages: conv.messages.map((m) => ({
+      messages: messages.map((m) => ({
         id: m.id,
         role: m.role,
         content: m.content,
@@ -125,15 +128,24 @@ export class QaService {
       return;
     }
 
-    // 语义缓存（保守档）：命中不预扣、不调 LLM
+    // 语义缓存（保守档）：命中需先复检引用文档对当前用户可见 —— 缓存按 deptId 共享，
+    // user 级白名单授权的答案不能泄露给同部门未授权用户；可见性不过则视为未命中走全链路
     if (this.env.semanticCacheEnabled) {
       const hit = await this.cache.get(user.deptId, question);
-      if (hit) {
+      if (hit && (await this.cacheHitVisible(user, hit))) {
         sink.open({ messageId, requestId, retrieval: { ...zeroMeta, latencyMs: Date.now() - t0 } });
         sink.delta(hit.answer);
         sink.citations(hit.citations);
         sink.usage(EMPTY_USAGE);
         sink.done({ latencyMs: Date.now() - t0, cached: true });
+        // 命中同样落库问答对：否则回答在会话历史里消失、无法点踩反馈
+        await this.persistPair(conv.id, question, hit.answer, hit.citations, messageId, {
+          chunks: [],
+          degraded: false,
+          hitCount: 0,
+          latencyMs: Date.now() - t0,
+        }, Date.now() - t0, 'completed');
+        if (!conv.title) await this.prisma.conversation.update({ where: { id: conv.id }, data: { title: question.slice(0, 30) } });
         await this.queryLog.write({
           userId: user.userId,
           deptId: user.deptId,
@@ -146,7 +158,7 @@ export class QaService {
       }
     }
 
-    // ── 预扣配额（估算护栏，只做护栏不做计费）
+    // ── 检索（权限 WHERE 前置 → 双路 → RRF → rerank）；topK 透传给检索层，meta 与实际召回一致
     const topK = opts.topK ?? this.env.retrieval.topKFinal;
     const estPromptTokens = Math.ceil((question.length + topK * 500) / 1.6);
     try {
@@ -161,11 +173,10 @@ export class QaService {
       return;
     }
 
-    // ── 检索（权限 WHERE 前置 → 双路 → RRF → rerank）
     const scope: AccessScope = { userId: user.userId, deptId: user.deptId, isAdmin: user.role === 'admin' };
     let result: RetrievalResult;
     try {
-      result = await this.retrieval.retrieve(question, scope, { debug: true });
+      result = await this.retrieval.retrieve(question, scope, { debug: true, topKFinal: topK });
     } catch (err) {
       this.logger.error('retrieval failed', { err: String(err) });
       sink.open({ messageId, requestId, retrieval: zeroMeta });
@@ -326,8 +337,15 @@ export class QaService {
     }
   }
 
-  private async persistPair(
-    conversationId: string,
+  /** 缓存命中复检：全部被引文档对当前用户可见才允许返回（缓存按 deptId 共享，防白名单内容越权） */
+  private async cacheHitVisible(user: AuthedUser, hit: { citations: CitationDto[] }): Promise<boolean> {
+    const docIds = [...new Set(hit.citations.map((c) => c.documentId))];
+    if (!docIds.length) return true;
+    const visible = await this.prisma.document.count({ where: { id: { in: docIds }, ...visibilityOf(user) } });
+    return visible >= docIds.length;
+  }
+
+  private async persistPair(    conversationId: string,
     question: string,
     answer: string,
     citations: CitationDto[],
@@ -367,11 +385,14 @@ export class QaService {
     history: Array<{ role: 'user' | 'assistant'; content: string }> | import('@lib/contracts').ChatMessage[];
     summary: string | null;
   }> {
+    const maxMsgs = this.env.qa.maxHistoryTurns * 2;
+    // 只取最近 3×maxMsgs 条参与压缩判断；更早历史本就该被摘要接管，避免全量拉取
     const rows: Message[] = await this.prisma.message.findMany({
       where: { conversationId, content: { not: '' } },
-      orderBy: { createdAt: 'asc' },
+      orderBy: { createdAt: 'desc' },
+      take: maxMsgs * 3,
     });
-    const maxMsgs = this.env.qa.maxHistoryTurns * 2;
+    rows.reverse();
     let summary = existingSummary;
     if (rows.length > maxMsgs) {
       summary = await this.summarize(conversationId, existingSummary, rows, user);

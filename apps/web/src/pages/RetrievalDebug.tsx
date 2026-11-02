@@ -50,10 +50,10 @@ export default function RetrievalDebug() {
 
   const byId = new Map((result?.chunks ?? []).map((c) => [c.chunkId, c]));
   const list = (ids: Array<{ chunkId: string; score: number }>): DebugChunk[] =>
-    ids
-      .map((i) => byId.get(i.chunkId))
-      .filter((c): c is DebugChunk => Boolean(c))
-      .map((c, idx) => ({ ...c, score: ids[idx].score }));
+    ids.flatMap((i) => {
+      const c = byId.get(i.chunkId);
+      return c ? [{ ...c, score: i.score }] : [];
+    });
 
   const b = result?.debug;
   const bd = b?.breakdown;

@@ -54,6 +54,8 @@ export default function Chat() {
   const [fbReasons, setFbReasons] = useState<string[]>([]);
   const [fbComment, setFbComment] = useState('');
   const [fbDone, setFbDone] = useState<Record<string, 'up' | 'down'>>({});
+  const [fbBusy, setFbBusy] = useState(false);
+  const [pageError, setPageError] = useState<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const messagesRef = useRef<LiveMessage[]>([]);
@@ -70,6 +72,7 @@ export default function Chat() {
   const activeConvRef = useRef<string | null>(null);
 
   const openConv = useCallback(async (id: string) => {
+    abortRef.current?.abort(); // 切换会话前终止仍在进行的流式回答，避免旧内容串台
     activeConvRef.current = id;
     setActiveConv(id);
     setMessages([]); // 立即清空，避免上一会话内容残留到加载完成后突然替换（闪屏）
@@ -90,6 +93,8 @@ export default function Chat() {
             createdAt: m.createdAt,
           })),
       );
+    } catch (err) {
+      if (activeConvRef.current === id) setPageError(err instanceof Error ? err.message : '加载会话失败');
     } finally {
       if (activeConvRef.current === id) setConvLoading(false);
     }
@@ -100,8 +105,14 @@ export default function Chat() {
   }, [messages]);
 
   const removeConv = useCallback(async (id: string) => {
-    await api(`/qa/conversations/${id}`, { method: 'DELETE' });
+    try {
+      await api(`/qa/conversations/${id}`, { method: 'DELETE' });
+    } catch (err) {
+      setPageError(err instanceof Error ? err.message : '删除会话失败');
+      return;
+    }
     if (activeConv === id) {
+      abortRef.current?.abort();
       setActiveConv(null);
       setMessages([]);
     }
@@ -109,24 +120,36 @@ export default function Chat() {
   }, [activeConv, loadConvs]);
 
   const newConv = useCallback(async () => {
-    const conv = await api<Conversation>('/qa/conversations', { body: {} });
-    await loadConvs();
-    activeConvRef.current = conv.id;
-    setActiveConv(conv.id);
-    setMessages([]);
+    try {
+      const conv = await api<Conversation>('/qa/conversations', { body: {} });
+      await loadConvs();
+      abortRef.current?.abort();
+      activeConvRef.current = conv.id;
+      setActiveConv(conv.id);
+      setMessages([]);
+    } catch (err) {
+      setPageError(err instanceof Error ? err.message : '新建会话失败');
+    }
   }, [loadConvs]);
 
   const send = useCallback(async () => {
     const question = input.trim();
     if (!question || streaming) return;
     let convId = activeConv;
-    if (!convId) {
-      const conv = await api<Conversation>('/qa/conversations', { body: {} });
-      await loadConvs();
-      activeConvRef.current = conv.id;
-      setActiveConv(conv.id);
-      convId = conv.id;
+    try {
+      if (!convId) {
+        const conv = await api<Conversation>('/qa/conversations', { body: {} });
+        await loadConvs();
+        activeConvRef.current = conv.id;
+        setActiveConv(conv.id);
+        convId = conv.id;
+      }
+    } catch (err) {
+      // 建会话失败：还原输入并提示，不让 Promise 链静默失败
+      setPageError(err instanceof Error ? err.message : '创建会话失败，请重试');
+      return;
     }
+    setPageError(null);
     setInput('');
     setStreaming(true);
     const userMsg: LiveMessage = { id: `u-${Date.now()}`, role: 'user', content: question, createdAt: new Date().toISOString() };
@@ -139,10 +162,12 @@ export default function Chat() {
 
     const controller = new AbortController();
     abortRef.current = controller;
+    const streamConvId = convId;
     // meta 事件会把草稿 id 换成服务端 messageId —— patch 必须跟随当前 id。
     // 注意：不用函数式更新（updater 在并发场景下可能基于过期闭包），直接以 ref 中的最新数组替换。
     const latestRef = { current: messagesRef.current };
     const patch = (fn: (m: LiveMessage) => LiveMessage) => {
+      if (activeConvRef.current !== streamConvId) return; // 已切换会话，丢弃流式写入，防止串台
       const next = latestRef.current.map((m) => (m.id === currentId ? fn(m) : m));
       latestRef.current = next;
       setMessages(next);
@@ -186,13 +211,21 @@ export default function Chat() {
   }, []);
 
   const submitFeedback = useCallback(async (messageId: string, rating: 'up' | 'down', reasons: string[], comment: string) => {
+    if (fbBusy) return;
     if (messageId.startsWith('u-') || messageId.startsWith('a-')) return; // 尚未落库的流式消息
-    await api(`/messages/${messageId}/feedback`, { body: { rating, reasons, comment: comment || undefined } });
-    setFbDone((prev) => ({ ...prev, [messageId]: rating }));
-    setFbTarget(null);
-    setFbReasons([]);
-    setFbComment('');
-  }, []);
+    setFbBusy(true);
+    try {
+      await api(`/messages/${messageId}/feedback`, { body: { rating, reasons, comment: comment || undefined } });
+      setFbDone((prev) => ({ ...prev, [messageId]: rating }));
+      setFbTarget(null);
+      setFbReasons([]);
+      setFbComment('');
+    } catch (err) {
+      setPageError(err instanceof Error ? err.message : '提交反馈失败');
+    } finally {
+      setFbBusy(false);
+    }
+  }, [fbBusy]);
 
   return (
     <div className="chat-wrap">
@@ -216,6 +249,17 @@ export default function Chat() {
       </aside>
 
       <div className="chat-main">
+        {pageError && (
+          <div className="alert-banner alert-critical" style={{ margin: '12px 16px 0', maxWidth: 640 }}>
+            <CircleAlert />
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <span>{pageError}</span>
+              <button className="icon-btn" title="关闭" onClick={() => setPageError(null)}>
+                <X />
+              </button>
+            </div>
+          </div>
+        )}
         <div className="chat-scroll" ref={scrollRef}>
           <div className="chat-inner">
             {messages.length === 0 && !convLoading && (
@@ -275,6 +319,7 @@ export default function Chat() {
           onComment={setFbComment}
           onClose={() => setFbTarget(null)}
           onSubmit={(rating) => void submitFeedback(fbTarget.messageId, rating, fbReasons, fbComment)}
+          busy={fbBusy}
         />
       )}
     </div>
@@ -439,8 +484,9 @@ function FeedbackPopover(props: {
   onComment: (v: string) => void;
   onClose: () => void;
   onSubmit: (rating: 'up' | 'down') => void;
+  busy?: boolean;
 }) {
-  const { pos, reasons, onToggle, comment, onComment, onClose, onSubmit } = props;
+  const { pos, reasons, onToggle, comment, onComment, onClose, onSubmit, busy } = props;
   const isDown = reasons.length > 0;
   return (
     <>
@@ -468,7 +514,7 @@ function FeedbackPopover(props: {
           <button className="btn btn-ghost btn-sm" onClick={onClose}>
             取消
           </button>
-          <button className="btn btn-primary btn-sm" onClick={() => onSubmit(isDown ? 'down' : 'up')}>
+          <button className="btn btn-primary btn-sm" disabled={busy} onClick={() => onSubmit(isDown ? 'down' : 'up')}>
             提交反馈
           </button>
         </div>

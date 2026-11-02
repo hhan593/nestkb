@@ -1,4 +1,4 @@
-import { Body, Controller, Delete, Get, HttpCode, HttpStatus, Inject, Param, Post, Req, Res, UseGuards } from '@nestjs/common';
+import { Body, Controller, Delete, Get, HttpCode, HttpException, HttpStatus, Inject, Param, Post, Req, Res, UseGuards } from '@nestjs/common';
 import type { FastifyReply, FastifyRequest } from 'fastify';
 import { QaSseEvent } from '@lib/contracts';
 import { TraceService } from '@app/common';
@@ -101,7 +101,10 @@ export class QaController {
         sink,
       });
     } catch (err) {
-      // 编排之外的兜底：确保客户端总能收到终止事件
+      // 尚未开流且是语义化异常（404 会话不存在 / 429 限流等）：保留原状态码交给全局过滤器，
+      // 不再一律吞成 200 + UPSTREAM_ERROR
+      if (!metaSent && err instanceof HttpException) throw err;
+      // 已开流的兜底：确保客户端总能收到终止事件
       sink.open({
         messageId: '',
         requestId,

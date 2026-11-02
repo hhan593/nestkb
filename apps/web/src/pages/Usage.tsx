@@ -19,10 +19,13 @@ const SCENE_LABEL: Record<string, string> = {
 };
 
 function monthRange(): [string, string] {
+  // 用本地日期拼 yyyy-MM-dd，避免 toISOString 的 UTC 偏移把月初错位一天
   const now = new Date();
+  const pad = (n: number) => String(n).padStart(2, '0');
+  const fmt = (d: Date) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
   const from = new Date(now.getFullYear(), now.getMonth(), 1);
   const to = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59);
-  return [from.toISOString().slice(0, 10), to.toISOString().slice(0, 10)];
+  return [fmt(from), fmt(to)];
 }
 
 export default function Usage() {

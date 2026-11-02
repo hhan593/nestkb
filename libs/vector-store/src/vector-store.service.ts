@@ -36,31 +36,36 @@ export interface ReplaceVersionPayload {
 @Injectable()
 export class VectorStoreService implements OnApplicationShutdown {
   private readonly pool: Pool;
+  private readonly embeddingModel: string;
 
   constructor(@Inject(ENV) env: AppEnv) {
     this.pool = new Pool({ connectionString: env.pgvectorUrl, max: 10 });
+    this.embeddingModel = env.embedding.model;
   }
 
   async onApplicationShutdown(): Promise<void> {
     await this.pool.end().catch(() => undefined);
   }
 
-  /** 幂等闸：同版本已入库直接跳过（BullMQ jobId 去重之外的第二道保险） */
-  async hasVersion(versionId: string): Promise<boolean> {
-    const { rowCount } = await this.pool.query('SELECT 1 FROM document_chunks WHERE version_id = $1 LIMIT 1', [
-      versionId,
-    ]);
+  /** 幂等闸：同版本且同 embedding 模型已入库才跳过；换模型后旧向量不可复用，需重摄取 */
+  async hasVersion(versionId: string, embeddingModel = this.embeddingModel): Promise<boolean> {
+    const { rowCount } = await this.pool.query(
+      'SELECT 1 FROM document_chunks WHERE version_id = $1 AND embedding_model = $2 LIMIT 1',
+      [versionId, embeddingModel],
+    );
     return (rowCount ?? 0) > 0;
   }
 
   /**
    * 先删后写单事务（防新旧版本混检）：按 document 清空旧块再写入新版本全部块。
-   * tsv 由 to_tsvector('simple') 落库，trgm 走 content 列上的 GIN 索引。
+   * 事务内取同文档 advisory lock —— 并发摄取同文档的两个 job 串行化，杜绝互删 chunks。
+   * tsv 由 to_tsvector('simple') 落库（含章节标题），trgm 走 content 列上的 GIN 索引。
    */
   async replaceVersion(payload: ReplaceVersionPayload): Promise<number> {
     const client: PoolClient = await this.pool.connect();
     try {
       await client.query('BEGIN');
+      await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [payload.documentId]);
       await client.query('DELETE FROM document_chunks WHERE document_id = $1', [payload.documentId]);
       let written = 0;
       const batchSize = 50;
@@ -85,16 +90,16 @@ export class VectorStoreService implements OnApplicationShutdown {
             c.tokenEstimate,
             JSON.stringify({ isTable: c.isTable, aclDeptIds: payload.aclDeptIds }),
           );
-          return `($1, $${b + 2}, $${b + 3}, $${b + 4}, $${b + 5}, $${b + 6}, $${b + 7}::vector, $${b + 8}, $${b + 9}, to_tsvector('simple', $${b + 5}), $${b + 10}::jsonb)`;
+          return `($1, $${b + 2}, $${b + 3}, $${b + 4}, $${b + 5}, $${b + 6}, $${b + 7}::vector, $${b + 8}, $${b + 9}, to_tsvector('simple', $${b + 6} || ' ' || $${b + 5}), $${b + 10}::jsonb)`;
         });
-        await client.query(
+        const result = await client.query(
           `INSERT INTO document_chunks
              (document_id, version_id, dept_id, chunk_no, content, heading_path, embedding, embedding_model, token_count, tsv, metadata)
            VALUES ${rows.join(', ')}
            ON CONFLICT (version_id, chunk_no) DO NOTHING`,
           [payload.documentId, ...values],
         );
-        written += chunkSlice.length;
+        written += result.rowCount ?? chunkSlice.length;
       }
       await client.query('COMMIT');
       return written;
@@ -125,24 +130,33 @@ export class VectorStoreService implements OnApplicationShutdown {
     return rows.map((r) => r.id);
   }
 
-  /** 向量召回：权限 WHERE 前置，只检索当前版本，过期文档不可召回 */
-  async searchVectors(vector: number[], topK: number, scope: AccessScope, versionIds: string[]): Promise<ChunkRow[]> {
-    if (!versionIds.length) return [];
-    const w = accessWhereSql(scope, 3, 'c.dept_id');
-    const params: unknown[] = [`[${vector.join(',')}]`, versionIds, ...w.params];
-    const limitIdx = params.length + 1;
-    params.push(topK);
+  /** 向量召回：权限 WHERE 前置，只检索当前版本，过期文档不可召回；版本范围在 SQL 内解析（免传全库 id 数组） */
+  async searchVectors(vector: number[], topK: number, scope: AccessScope): Promise<ChunkRow[]> {
+    const wv = accessWhereSql(scope, 1, 'd.department_id');
+    const wc = accessWhereSql(scope, wv.params.length + 1, 'c.dept_id');
+    const params: unknown[] = [...wv.params, ...wc.params, this.embeddingModel, `[${vector.join(',')}]`, topK];
+    const modelIdx = wv.params.length + wc.params.length + 1;
+    const vecIdx = modelIdx + 1;
+    const limitIdx = modelIdx + 2;
     const { rows } = await this.pool.query<ChunkRow>(
       `SELECT c.id, c.document_id, c.version_id, c.chunk_no, c.content, c.heading_path,
               d.title, v.version_no, v.effective_at, v.expires_at,
-              1 - (c.embedding <=> $1) AS score
+              1 - (c.embedding <=> $${vecIdx}) AS score
          FROM document_chunks c
          JOIN documents d         ON d.id = c.document_id
          JOIN document_versions v ON v.id = c.version_id
-        WHERE c.version_id = ANY($2)
+        WHERE c.version_id IN (
+                SELECT v.id
+                  FROM document_versions v
+                  JOIN documents d ON d.id = v.document_id
+                 WHERE d.status = 'active'
+                   AND d.current_version_id = v.id
+                   AND (v.expires_at IS NULL OR v.expires_at > now())
+                   AND ${wv.sql})
           AND (v.expires_at IS NULL OR v.expires_at > now())
-          AND ${w.sql}
-        ORDER BY c.embedding <=> $1
+          AND c.embedding_model = $${modelIdx}
+          AND ${wc.sql}
+        ORDER BY c.embedding <=> $${vecIdx}
         LIMIT $${limitIdx}`,
       params,
     );
@@ -153,26 +167,33 @@ export class VectorStoreService implements OnApplicationShutdown {
    * 关键词召回：PostgreSQL FTS（simple 配置）+ pg_trgm 兜底（中文分词断层时的模糊匹配）。
    * 与向量同库免同步；权限 WHERE 与向量路完全一致。
    */
-  async searchFts(query: string, topK: number, scope: AccessScope, versionIds: string[]): Promise<ChunkRow[]> {
-    if (!versionIds.length) return [];
-    const w = accessWhereSql(scope, 3, 'c.dept_id');
-    const params: unknown[] = [query, versionIds, ...w.params];
-    const limitIdx = params.length + 1;
-    params.push(topK);
+  async searchFts(query: string, topK: number, scope: AccessScope): Promise<ChunkRow[]> {
+    const wv = accessWhereSql(scope, 1, 'd.department_id');
+    const wc = accessWhereSql(scope, wv.params.length + 1, 'c.dept_id');
+    const params: unknown[] = [...wv.params, ...wc.params, query, topK];
+    const queryIdx = wv.params.length + wc.params.length + 1;
+    const limitIdx = queryIdx + 1;
     const { rows } = await this.pool.query<ChunkRow>(
       `SELECT c.id, c.document_id, c.version_id, c.chunk_no, c.content, c.heading_path,
               d.title, v.version_no, v.effective_at, v.expires_at,
               GREATEST(
-                ts_rank(c.tsv, websearch_to_tsquery('simple', $1)),
-                similarity(c.content, $1)
+                ts_rank(c.tsv, websearch_to_tsquery('simple', $${queryIdx})),
+                similarity(c.content, $${queryIdx})
               ) AS score
          FROM document_chunks c
          JOIN documents d         ON d.id = c.document_id
          JOIN document_versions v ON v.id = c.version_id
-        WHERE c.version_id = ANY($2)
+        WHERE c.version_id IN (
+                SELECT v.id
+                  FROM document_versions v
+                  JOIN documents d ON d.id = v.document_id
+                 WHERE d.status = 'active'
+                   AND d.current_version_id = v.id
+                   AND (v.expires_at IS NULL OR v.expires_at > now())
+                   AND ${wv.sql})
           AND (v.expires_at IS NULL OR v.expires_at > now())
-          AND ${w.sql}
-          AND (c.tsv @@ websearch_to_tsquery('simple', $1) OR c.content % $1)
+          AND ${wc.sql}
+          AND (c.tsv @@ websearch_to_tsquery('simple', $${queryIdx}) OR c.content % $${queryIdx})
         ORDER BY score DESC
         LIMIT $${limitIdx}`,
       params,

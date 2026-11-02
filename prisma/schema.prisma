@@ -348,6 +348,7 @@ model Feedback {
 
   message Message @relation(fields: [messageId], references: [id], onDelete: Cascade)
 
+  @@unique([messageId, userId])
   @@index([rating, createdAt])
   @@map("feedbacks")
 }

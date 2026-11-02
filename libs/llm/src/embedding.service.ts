@@ -50,7 +50,8 @@ export class EmbeddingService {
     for (let attempt = 0; ; attempt++) {
       await this.throttle();
       try {
-        return await this.provider.embed(texts);
+        // 整体超时：上游挂起（TCP 半开/代理 stall）时不能让 job 永不结束
+        return await this.provider.embed(texts, AbortSignal.timeout(this.env.embedding.timeoutMs));
       } catch (err) {
         const retryable = err instanceof LlmUpstreamError ? err.retryable : isTransient(err);
         if (!retryable || attempt >= MAX_RETRIES - 1) throw err;
@@ -74,7 +75,7 @@ export class EmbeddingService {
 
 function isTransient(err: unknown): boolean {
   const msg = err instanceof Error ? err.message : String(err);
-  return /ECONNRESET|ETIMEDOUT|429|rate.?limit|5\d{2}/i.test(msg);
+  return /ECONNRESET|ETIMEDOUT|429|rate.?limit|5\d{2}|timeout|aborted/i.test(msg);
 }
 
 function sleep(ms: number): Promise<void> {

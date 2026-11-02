@@ -1,5 +1,5 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from 'react';
-import { api, loadTokens, saveTokens, type Me, type Tokens } from './api';
+import { api, loadTokens, saveTokens, UNAUTHORIZED_EVENT, type Me, type Tokens } from './api';
 
 interface AuthState {
   me: Me | null;
@@ -22,14 +22,23 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
     try {
       setMe(await api<Me>('/auth/me'));
-    } catch {
-      setMe(null);
+    } catch (err) {
+      // 仅在 token 确认失效（401）时清空登录态；网络抖动 / 5xx 保留当前状态，避免误踢用户
+      if (err instanceof Error && 'status' in err && (err as { status: number }).status === 401) {
+        setMe(null);
+      }
     }
   }, []);
 
   useEffect(() => {
     void refreshMe().finally(() => setLoading(false));
   }, [refreshMe]);
+
+  useEffect(() => {
+    const onUnauthorized = () => setMe(null);
+    window.addEventListener(UNAUTHORIZED_EVENT, onUnauthorized);
+    return () => window.removeEventListener(UNAUTHORIZED_EVENT, onUnauthorized);
+  }, []);
 
   const login = useCallback(async (email: string, password: string) => {
     const data = await api<{ accessToken: string; refreshToken: string; user: Me }>('/auth/login', {
@@ -41,6 +50,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const logout = useCallback(() => {
+    const tokens = loadTokens();
+    // 尽力通知服务端吊销 refresh token；失败不阻塞本地登出
+    if (tokens?.refreshToken) {
+      void fetch('/auth/logout', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ refreshToken: tokens.refreshToken }),
+      }).catch(() => undefined);
+    }
     saveTokens(null);
     setMe(null);
   }, []);

@@ -23,16 +23,16 @@ export const envSchema = z
     JWT_ACCESS_TTL: z.string().default('2h'),
     JWT_REFRESH_TTL: z.string().default('7d'),
 
+    // 登录防爆破：同一 IP+邮箱失败 N 次锁定，同一 IP 全局限 M 次（15 分钟窗口）
+    AUTH_LOGIN_FAIL_LIMIT: z.coerce.number().int().positive().default(10),
+    AUTH_LOGIN_IP_LIMIT: z.coerce.number().int().positive().default(50),
+    // CORS 来源白名单（逗号分隔）；留空 = 仅允许同源（无 Origin 头的请求放行）
+    CORS_ORIGINS: z.string().default(''),
+
     DATABASE_URL: z.string().min(1),
     PGVECTOR_URL: z.string().min(1),
     REDIS_URL: z.string().min(1),
     STORAGE_DIR: z.string().default('storage/uploads'),
-
-    LLM_CHAT_PROVIDER: z.enum(['openai-compat', 'mock']).default('mock'),
-    LLM_CHAT_BASE_URL: z.string().optional(),
-    LLM_CHAT_API_KEY: z.string().optional(),
-    LLM_CHAT_MODEL: z.string().default('mock-chat'),
-    LLM_CHAT_TEMPERATURE: z.coerce.number().min(0).max(2).default(0.2),
 
     LLM_EMBEDDING_PROVIDER: z.enum(['openai-compat', 'mock']).default('mock'),
     LLM_EMBEDDING_BASE_URL: z.string().optional(),
@@ -41,6 +41,14 @@ export const envSchema = z
     EMBEDDING_DIM: z.coerce.number().int().positive().default(1024),
     EMBEDDING_BATCH_SIZE: z.coerce.number().int().positive().default(32),
     EMBEDDING_RPM: z.coerce.number().int().positive().default(1200),
+    EMBED_TIMEOUT_MS: z.coerce.number().int().positive().default(60_000),
+
+    LLM_CHAT_PROVIDER: z.enum(['openai-compat', 'mock']).default('mock'),
+    LLM_CHAT_BASE_URL: z.string().optional(),
+    LLM_CHAT_API_KEY: z.string().optional(),
+    LLM_CHAT_MODEL: z.string().default('mock-chat'),
+    LLM_CHAT_TEMPERATURE: z.coerce.number().min(0).max(2).default(0.2),
+    CHAT_IDLE_TIMEOUT_MS: z.coerce.number().int().positive().default(120_000),
 
     LLM_RERANK_PROVIDER: z.enum(['openai-compat', 'mock']).default('mock'),
     LLM_RERANK_BASE_URL: z.string().optional(),
@@ -117,12 +125,16 @@ export interface AppEnv {
   jwtSecret: string;
   jwtAccessTtl: string;
   jwtRefreshTtl: string;
+  /** 登录防爆破阈值（15 分钟窗口） */
+  auth: { loginFailLimit: number; loginIpLimit: number };
+  /** CORS 来源白名单；空数组 = 仅同源 */
+  corsOrigins: string[];
   databaseUrl: string;
   pgvectorUrl: string;
   redisUrl: string;
   storageDir: string;
-  chat: ProviderConfig & { temperature: number };
-  embedding: ProviderConfig & { dim: number; batchSize: number; rpm: number };
+  chat: ProviderConfig & { temperature: number; idleTimeoutMs: number };
+  embedding: ProviderConfig & { dim: number; batchSize: number; rpm: number; timeoutMs: number };
   rerank: ProviderConfig & { timeoutMs: number };
   /** 模型名 → 价格表（元/百万 token 或 元/次）；成本看板与预算闸唯一依据 */
   priceTable: Record<string, PriceEntry>;
@@ -174,6 +186,11 @@ export function parseEnv(raw: NodeJS.ProcessEnv): AppEnv {
     jwtSecret: c.JWT_SECRET,
     jwtAccessTtl: c.JWT_ACCESS_TTL,
     jwtRefreshTtl: c.JWT_REFRESH_TTL,
+    auth: { loginFailLimit: c.AUTH_LOGIN_FAIL_LIMIT, loginIpLimit: c.AUTH_LOGIN_IP_LIMIT },
+    corsOrigins: c.CORS_ORIGINS
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean),
     databaseUrl: c.DATABASE_URL,
     pgvectorUrl: c.PGVECTOR_URL,
     redisUrl: c.REDIS_URL,
@@ -184,6 +201,7 @@ export function parseEnv(raw: NodeJS.ProcessEnv): AppEnv {
       apiKey: c.LLM_CHAT_API_KEY,
       model: c.LLM_CHAT_MODEL,
       temperature: c.LLM_CHAT_TEMPERATURE,
+      idleTimeoutMs: c.CHAT_IDLE_TIMEOUT_MS,
     },
     embedding: {
       provider: c.LLM_EMBEDDING_PROVIDER,
@@ -193,6 +211,7 @@ export function parseEnv(raw: NodeJS.ProcessEnv): AppEnv {
       dim: c.EMBEDDING_DIM,
       batchSize: c.EMBEDDING_BATCH_SIZE,
       rpm: c.EMBEDDING_RPM,
+      timeoutMs: c.EMBED_TIMEOUT_MS,
     },
     rerank: {
       provider: c.LLM_RERANK_PROVIDER,

@@ -102,7 +102,13 @@ export class DocumentsController {
       throw new BadRequestException({ code: ErrorCodes.VALIDATION_FAILED, message: msg });
     }
     if (!file) throw new BadRequestException({ code: ErrorCodes.VALIDATION_FAILED, message: '缺少 file 字段' });
+    if (!ALLOWED_MIME.has(file.mimetype)) {
+      throw new BadRequestException({ code: ErrorCodes.UNSUPPORTED_TYPE, message: `不支持的文件类型：${file.mimetype}` });
+    }
     const expiresAt = fields.expiresAt ? new Date(fields.expiresAt) : null;
+    if (fields.expiresAt && Number.isNaN(expiresAt?.getTime())) {
+      throw new BadRequestException({ code: ErrorCodes.VALIDATION_FAILED, message: 'expiresAt 不是合法时间' });
+    }
     return this.documents.addVersion(user, id, {
       buffer: file.buffer,
       filename: file.filename,

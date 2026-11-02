@@ -15,7 +15,8 @@ const root = ReactDOM.createRoot(document.getElementById('root')!);
 window.__boot.push('root-created');
 root.render(
   <React.StrictMode>
-    <BrowserRouter basename="/kb">
+    {/* 后端在根路径托管 SPA（web-ui.controller.ts），路由不加 basename，避免 401 跳转 /login 落到路由器之外 */}
+    <BrowserRouter>
       <AuthProvider>
         <ErrorBoundary>
           <App />
