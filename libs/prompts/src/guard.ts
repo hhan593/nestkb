@@ -44,13 +44,18 @@ export function sanitizeChunkContent(content: string): { content: string; interc
   const lines = content.split('\n');
   let intercepted = false;
   const cleaned = lines.map((line) => {
-    const hit = INJECTION_PATTERNS.find((p) => p.re.test(line));
-    if (hit) {
-      intercepted = true;
-      // 只替换命中的短语而非整行：正文其余部分（可能是正常制度条款）保留给模型
-      return line.replace(hit.re, INTERCEPT_MARK);
+    let out = line;
+    let hit = false;
+    // 应用全部命中的模式（不只是第一个），只替换命中短语不整行销毁：
+    // 正文其余部分（可能是正常制度条款）保留给模型
+    for (const p of INJECTION_PATTERNS) {
+      if (p.re.test(out)) {
+        hit = true;
+        out = out.replace(p.re, INTERCEPT_MARK);
+      }
     }
-    return line;
+    if (hit) intercepted = true;
+    return out;
   });
   return { content: intercepted ? cleaned.join('\n') : content, intercepted };
 }

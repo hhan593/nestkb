@@ -226,6 +226,8 @@ describe('RAG 全链路 E2E', () => {
     const events = await ask(base, alice, convId, '代码评审需要几个人批准？');
     const meta = events.find((e) => e.event === 'meta')!.data as { messageId: string };
 
+    // 反馈回流现在按问题去重：先清掉历史运行遗留的同问题 case，保证本次断言可复现
+    await prisma.evalCase.deleteMany({ where: { question: '代码评审需要几个人批准？', source: 'feedback' } });
     const before = await prisma.evalCase.count({ where: { source: 'feedback' } });
     const fb = await request(base)
       .post(`/messages/${meta.messageId}/feedback`)

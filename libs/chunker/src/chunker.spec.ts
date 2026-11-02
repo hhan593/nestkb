@@ -51,16 +51,26 @@ describe('chunker：三级标题嵌套', () => {
   });
 });
 
-describe('chunker：整页表格不腰斩', () => {
+describe('chunker：表格分块', () => {
   const rows = Array.from({ length: 30 }, (_, i) => `| 行${i} | 数据${i} | 数据${i}${i} |`).join('\n');
   const text = `# 差旅制度\n\n### 3.1 住宿标准\n\n| 职级 | 一线 | 二线 |\n| --- | --- | --- |\n${rows}\n\n表格后段落。`;
 
-  it('连续 | 行聚合为一个 isTable 整块', () => {
-    const chunks = chunkDocument(text, { maxChars: 100 }); // 故意切小：表格也不拦腰切
-    const tableChunk = chunks.find((c) => c.isTable);
-    expect(tableChunk).toBeDefined();
-    expect(tableChunk!.content).toContain('| 行29 |');
-    expect(tableChunk!.headingPath).toBe('差旅制度 > 3.1 住宿标准');
+  it('超长表格按行聚合下切为多个 isTable 片，每片携带表头，不产生超限毒 chunk', () => {
+    const chunks = chunkDocument(text, { maxChars: 100 }); // 故意切小：表格按行下切而非整块直通
+    const tableChunks = chunks.filter((c) => c.isTable);
+    expect(tableChunks.length).toBeGreaterThan(1); // 30 行被切成多片
+    expect(tableChunks.some((c) => c.content.includes('| 行29 |'))).toBe(true); // 全部行都在
+    for (const c of tableChunks) {
+      expect(c.content).toContain('| 职级 | 一线 | 二线 |'); // 表头随片重复，每片自含列语义
+      expect(c.headingPath).toBe('差旅制度 > 3.1 住宿标准');
+    }
+  });
+
+  it('小表格保持整块不腰斩', () => {
+    const chunks = chunkDocument('前言\n\n| a | b |\n| c | d |\n\n后语', { maxChars: 100 });
+    const table = chunks.filter((c) => c.isTable);
+    expect(table).toHaveLength(1);
+    expect(table[0].content).toBe('| a | b |\n| c | d |');
   });
 
   it('groupTableBlocks 把表格与普通文本分离', () => {
