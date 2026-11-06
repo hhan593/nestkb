@@ -20,7 +20,8 @@ COPY prisma ./prisma
 COPY libs ./libs
 COPY apps ./apps
 COPY eval ./eval
-COPY scripts ./scripts   # runtime 层从 /app/scripts 引用（runtime-paths.js / 容器内 seed）
+# runtime 层从 /app/scripts 引用（runtime-paths.js / 容器内 seed / deploy.sh）
+COPY scripts ./scripts
 RUN npx prisma generate \
  && pnpm build \
  && pnpm build:web
