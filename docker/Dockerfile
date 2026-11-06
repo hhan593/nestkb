@@ -27,7 +27,7 @@ FROM base AS prod-deps
 COPY --from=deps /root/.local/share/pnpm/store /root/.local/share/pnpm/store
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 COPY prisma ./prisma
-RUN pnpm install --frozen-lockfile --prod --offline
+RUN pnpm install --frozen-lockfile --prod  # 不加 --offline：pnpm fetch 的元数据缓存不含 --prod 解析所需条目（ERR_PNPM_NO_OFFLINE_META）；本层以 lockfile 为缓存键，仅在依赖变更时重跑
 
 # ── 运行层：仅产物 + 生产依赖，非 root 运行 ──
 FROM node:24-alpine AS runtime
