@@ -4,30 +4,29 @@ FROM node:24-alpine AS base
 RUN corepack enable && corepack prepare pnpm@11 --activate
 WORKDIR /app
 
-# ── 依赖层（pnpm fetch 缓存友好） ──
+# ── 依赖层：完整安装（含 devDeps，供构建）；以 manifests 为缓存键，依赖变更才重跑 ──
 FROM base AS deps
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
-RUN pnpm fetch
+RUN pnpm install --frozen-lockfile
+# 不用 pnpm fetch + --offline：v10+ 的 fetch 元数据镜像不完整，离线解析必炸 ERR_PNPM_NO_OFFLINE_META
 
 # ── 构建层：prisma generate + web + api/worker ──
 FROM base AS build
-COPY --from=deps /root/.local/share/pnpm/store /root/.local/share/pnpm/store
+COPY --from=deps /app/node_modules ./node_modules
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig*.json nest-cli.json ./
 COPY prisma ./prisma
 COPY libs ./libs
 COPY apps ./apps
 COPY eval ./eval
-RUN pnpm install --frozen-lockfile --offline \
- && npx prisma generate \
+RUN npx prisma generate \
  && pnpm build \
  && pnpm build:web
 
 # ── 生产依赖层：仅 dependencies（prisma CLI / tsconfig-paths 已移入 dependencies）+ 客户端生成 ──
 FROM base AS prod-deps
-COPY --from=deps /root/.local/share/pnpm/store /root/.local/share/pnpm/store
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 COPY prisma ./prisma
-RUN pnpm install --frozen-lockfile --prod  # 不加 --offline：pnpm fetch 的元数据缓存不含 --prod 解析所需条目（ERR_PNPM_NO_OFFLINE_META）；本层以 lockfile 为缓存键，仅在依赖变更时重跑
+RUN pnpm install --frozen-lockfile --prod
 
 # ── 运行层：仅产物 + 生产依赖，非 root 运行 ──
 FROM node:24-alpine AS runtime
