@@ -1,0 +1,97 @@
+# 2核2G 服务器专用编排：镜像从 GHCR 拉取（不在服务器上构建），内存极限配额。
+# 前置：CI（.github/workflows/ci.yml 的 docker job）已把镜像推到 ghcr.io/hhan593/nestkb:latest
+# 用法：docker compose -f docker/docker-compose.prod-2g.yml --env-file .env.prod up -d
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    # 2G 机器的 PG 极限配额
+    command: postgres -c shared_buffers=64MB -c effective_cache_size=512MB -c work_mem=4MB -c max_connections=50
+    environment: { POSTGRES_USER: nestkb, POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?请在 .env.prod 设置强密码}, POSTGRES_DB: nestkb }
+    volumes: [pgdata:/var/lib/postgresql/data]
+    mem_limit: 288m
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U nestkb']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    command: redis-server --maxmemory 64mb --maxmemory-policy allkeys-lru
+    volumes: [redisdata:/data]
+    mem_limit: 96m
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  api:
+    image: ghcr.io/hhan593/nestkb:latest
+    command: ['api']
+    ports: ['3000:3000']
+    environment:
+      PORT: '3000'
+      NODE_ENV: production
+      NODE_OPTIONS: --max-old-space-size=256
+      JWT_SECRET: ${JWT_SECRET:?请在 .env.prod 设置强随机值}
+      DATABASE_URL: postgresql://nestkb:${POSTGRES_PASSWORD}@postgres:5432/nestkb
+      PGVECTOR_URL: postgresql://nestkb:${POSTGRES_PASSWORD}@postgres:5432/nestkb
+      REDIS_URL: redis://redis:6379/0
+      STORAGE_DIR: /data/uploads
+      MAX_UPLOAD_MB: 10 # 2G 机器降档：worker 解析堆有限
+      LLM_CHAT_PROVIDER: ${LLM_CHAT_PROVIDER:-mock}
+      LLM_CHAT_BASE_URL: ${LLM_CHAT_BASE_URL:-}
+      LLM_CHAT_API_KEY: ${LLM_CHAT_API_KEY:-}
+      LLM_CHAT_MODEL: ${LLM_CHAT_MODEL:-mock-chat}
+      LLM_CHAT_TEMPERATURE: ${LLM_CHAT_TEMPERATURE:-0.2}
+      LLM_EMBEDDING_PROVIDER: ${LLM_EMBEDDING_PROVIDER:-mock}
+      LLM_EMBEDDING_BASE_URL: ${LLM_EMBEDDING_BASE_URL:-}
+      LLM_EMBEDDING_API_KEY: ${LLM_EMBEDDING_API_KEY:-}
+      LLM_EMBEDDING_MODEL: ${LLM_EMBEDDING_MODEL:-mock-embedding}
+      LLM_RERANK_PROVIDER: ${LLM_RERANK_PROVIDER:-mock}
+      LLM_RERANK_BASE_URL: ${LLM_RERANK_BASE_URL:-}
+      LLM_RERANK_API_KEY: ${LLM_RERANK_API_KEY:-}
+      LLM_RERANK_MODEL: ${LLM_RERANK_MODEL:-mock-reranker}
+      PRICE_JSON: ${PRICE_JSON:-{}}
+    volumes: [uploads:/data/uploads]
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    mem_limit: 320m
+    healthcheck:
+      test: ['CMD', 'wget', '-qO-', 'http://127.0.0.1:3000/kb']
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+
+  worker:
+    image: ghcr.io/hhan593/nestkb:latest
+    command: ['worker']
+    environment:
+      NODE_ENV: production
+      NODE_OPTIONS: --max-old-space-size=256
+      JWT_SECRET: ${JWT_SECRET:?}
+      DATABASE_URL: postgresql://nestkb:${POSTGRES_PASSWORD}@postgres:5432/nestkb
+      PGVECTOR_URL: postgresql://nestkb:${POSTGRES_PASSWORD}@postgres:5432/nestkb
+      REDIS_URL: redis://redis:6379/0
+      STORAGE_DIR: /data/uploads
+      MAX_UPLOAD_MB: 10
+      LLM_EMBEDDING_PROVIDER: ${LLM_EMBEDDING_PROVIDER:-mock}
+      LLM_EMBEDDING_BASE_URL: ${LLM_EMBEDDING_BASE_URL:-}
+      LLM_EMBEDDING_API_KEY: ${LLM_EMBEDDING_API_KEY:-}
+      LLM_EMBEDDING_MODEL: ${LLM_EMBEDDING_MODEL:-mock-embedding}
+      PRICE_JSON: ${PRICE_JSON:-{}}
+    volumes: [uploads:/data/uploads]
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    mem_limit: 384m
+    restart: unless-stopped
+
+volumes:
+  pgdata: {}
+  redisdata: {}
+  uploads: {}
