@@ -7,6 +7,7 @@ WORKDIR /app
 # ── 依赖层：完整安装（含 devDeps，供构建）；以 manifests 为缓存键，依赖变更才重跑 ──
 FROM base AS deps
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+COPY prisma ./prisma   # 根 postinstall 会跑 prisma generate，schema 必须先就位
 RUN pnpm install --frozen-lockfile
 # 不用 pnpm fetch + --offline：v10+ 的 fetch 元数据镜像不完整，离线解析必炸 ERR_PNPM_NO_OFFLINE_META
 
