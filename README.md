@@ -154,15 +154,6 @@ pnpm start:worker             # 同上，worker 入口
 - 优雅停机：SIGTERM → BullMQ worker 等当前 job 完成 → Prisma/Redis 关闭（已验证）。
 - 方案 B（Qdrant + MySQL + MinIO）：`docker compose --profile qdrant`，`VectorStore` 已接口化，切换只影响 `libs/vector-store` 实现类（`qdrantAccessFilter` 已备）。
 
-## 与计划书的实现偏差（刻意为之，均已注释）
-
-1. **成本单位统一为元（CNY）**：计划书 `ingestion_jobs.cost_usd` 与 PRICE_JSON（元/百万 token）货币口径冲突，统一为 `cost_estimated`（元）。
-2. **枚举用 Prisma enum**（原生 PG enum）替代 TEXT+CHECK：换取类型安全，语义一致。
-3. **Prisma + pg Pool 双轨**：Prisma 管元数据表；`document_chunks.embedding/tsv` 为 `Unsupported` 列，读写收口在 `libs/vector-store`（pg Pool + 原生 SQL，含 `<=>` 算子与 `to_tsvector('simple')`）。
-4. **mock provider**：新增的本地确定性桩（embedding=字符 bigram 哈希 / chat=资料合成回答 / rerank=词面覆盖率），零外部依赖跑通全链路与测试；接真实模型改 `.env` 即可。
-5. **表/列名 snake_case**：通过 Prisma `@map/@@map` 对齐计划书 DDL（6.1~6.10）。
-6. **语义缓存（保守档）**：归一化问题精确缓存（dept 隔离、默认关闭），向量相似缓存留作进阶。
-7. **reingest 为全量重跑**：计划书的"按 stage 断点续跑"未实现中间态持久化，失败重放从 parsing 开始（幂等键保证零重复 chunk）。
 
 ## 文档
 
