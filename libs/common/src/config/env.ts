@@ -41,6 +41,11 @@ export const envSchema = z
     EMBEDDING_DIM: z.coerce.number().int().positive().default(1024),
     EMBEDDING_BATCH_SIZE: z.coerce.number().int().positive().default(32),
     EMBEDDING_RPM: z.coerce.number().int().positive().default(1200),
+    // 请求体是否带 dimensions=EMBEDDING_DIM（OpenAI text-embedding-3 / 讯飞 MaaS 等支持；不支持的厂商须关闭）
+    EMBEDDING_SEND_DIMENSIONS: z
+      .string()
+      .default('false')
+      .transform((v) => ['1', 'true', 'yes'].includes(v.toLowerCase())),
     EMBED_TIMEOUT_MS: z.coerce.number().int().positive().default(60_000),
 
     LLM_CHAT_PROVIDER: z.enum(['openai-compat', 'mock']).default('mock'),
@@ -134,7 +139,14 @@ export interface AppEnv {
   redisUrl: string;
   storageDir: string;
   chat: ProviderConfig & { temperature: number; idleTimeoutMs: number };
-  embedding: ProviderConfig & { dim: number; batchSize: number; rpm: number; timeoutMs: number };
+  embedding: ProviderConfig & {
+    dim: number;
+    batchSize: number;
+    rpm: number;
+    timeoutMs: number;
+    /** 是否在请求体携带 dimensions（强制服务端按 dim 输出，避免维度漂移） */
+    sendDimensions: boolean;
+  };
   rerank: ProviderConfig & { timeoutMs: number };
   /** 模型名 → 价格表（元/百万 token 或 元/次）；成本看板与预算闸唯一依据 */
   priceTable: Record<string, PriceEntry>;
@@ -212,6 +224,7 @@ export function parseEnv(raw: NodeJS.ProcessEnv): AppEnv {
       batchSize: c.EMBEDDING_BATCH_SIZE,
       rpm: c.EMBEDDING_RPM,
       timeoutMs: c.EMBED_TIMEOUT_MS,
+      sendDimensions: c.EMBEDDING_SEND_DIMENSIONS,
     },
     rerank: {
       provider: c.LLM_RERANK_PROVIDER,

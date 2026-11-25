@@ -3,12 +3,15 @@ import { randomUUID } from 'node:crypto';
 import {
   CitationDto,
   ErrorCodes,
+  QaMode,
   RetrievalMetaDto,
+  RetrievedChunk,
   UsageDto,
 } from '@lib/contracts';
 import {
   NO_EVIDENCE_ANSWER,
   PERMISSION_FILTERED_ANSWER,
+  buildChatPrompt,
   buildRagPrompt,
   compressHistory,
   validateCitations,
@@ -43,6 +46,8 @@ export interface AskOptions {
   user: AuthedUser;
   question: string;
   topK?: number;
+  /** rag（默认）：检索增强；chat：纯对话，跳过检索与引用 */
+  mode?: QaMode;
   requestId: string;
   signal?: AbortSignal;
   sink: QaStreamSink;
@@ -117,8 +122,9 @@ export class QaService {
     });
     if (!conv) throw new NotFoundException('会话不存在');
 
+    const mode: QaMode = opts.mode ?? 'rag';
     const messageId = randomUUID();
-    const zeroMeta: RetrievalMetaDto = { topK: this.env.retrieval.topKFinal, hitCount: 0, rerankDegraded: false, latencyMs: 0 };
+    const zeroMeta: RetrievalMetaDto = { topK: this.env.retrieval.topKFinal, hitCount: 0, rerankDegraded: false, latencyMs: 0, mode };
 
     // 注入硬闸：直接索要系统提示的输入不进入检索
     if (isHardBlockedInput(question)) {
@@ -130,7 +136,8 @@ export class QaService {
 
     // 语义缓存（保守档）：命中需先复检引用文档对当前用户可见 —— 缓存按 deptId 共享，
     // user 级白名单授权的答案不能泄露给同部门未授权用户；可见性不过则视为未命中走全链路
-    if (this.env.semanticCacheEnabled) {
+    // 纯对话模式不读缓存（无引用可复检，也不该把自由回答写进知识库缓存）
+    if (mode === 'rag' && this.env.semanticCacheEnabled) {
       const hit = await this.cache.get(user.deptId, question);
       if (hit && (await this.cacheHitVisible(user, hit))) {
         sink.open({ messageId, requestId, retrieval: { ...zeroMeta, latencyMs: Date.now() - t0 } });
@@ -158,9 +165,12 @@ export class QaService {
       }
     }
 
-    // ── 检索（权限 WHERE 前置 → 双路 → RRF → rerank）；topK 透传给检索层，meta 与实际召回一致
+    // ── 预扣：两种模式都要过成本闸；chat 无资料块，预估只含问题 + 历史 + 预留输出
     const topK = opts.topK ?? this.env.retrieval.topKFinal;
-    const estPromptTokens = Math.ceil((question.length + topK * 500) / 1.6);
+    const estPromptTokens =
+      mode === 'chat'
+        ? Math.ceil((question.length + 1500) / 1.6)
+        : Math.ceil((question.length + topK * 500) / 1.6);
     try {
       await this.metering.preDeduct(user.userId, user.deptId, estPromptTokens);
     } catch (err) {
@@ -174,65 +184,95 @@ export class QaService {
     }
 
     const scope: AccessScope = { userId: user.userId, deptId: user.deptId, isAdmin: user.role === 'admin' };
-    let result: RetrievalResult;
-    try {
-      result = await this.retrieval.retrieve(question, scope, { debug: true, topKFinal: topK });
-    } catch (err) {
-      this.logger.error('retrieval failed', { err: String(err) });
-      sink.open({ messageId, requestId, retrieval: zeroMeta });
-      sink.error({ code: ErrorCodes.UPSTREAM_ERROR, message: '检索服务异常，请稍后重试', retryable: true });
-      await this.metering.release(user.userId);
-      return;
-    }
-    const { chunks, degraded, hitCount, latencyMs: retrievalMs, debug } = result;
+    // 两种模式的差异只收在这几个变量上：chat 恒为空召回、无引用、无 rerank 降级
+    let chunks: RetrievedChunk[] = [];
+    let degraded = false;
+    let hitCount = 0;
+    let retrievalMs = 0;
+    let debug: RetrievalResult['debug'];
 
-    sink.open({
-      messageId,
-      requestId,
-      retrieval: { topK, hitCount, rerankDegraded: degraded, latencyMs: retrievalMs },
-    });
-
-    await this.queryLog.write({
-      userId: user.userId,
-      deptId: user.deptId,
-      query: question,
-      scene: 'qa',
-      accessFilter: { deptId: user.deptId, isAdmin: user.role === 'admin' },
-      hitCount,
-      vectorTop: debug?.vectorTop ?? null,
-      ftsTop: debug?.ftsTop ?? null,
-      fusedTop: debug?.fusedTop ?? null,
-      rerankedTop: debug?.rerankedTop ?? null,
-      rerankDegraded: degraded,
-      latencyBreakdown: debug?.breakdown ?? null,
-      totalMs: result.latencyMs,
-      requestId,
-    });
-
-    // ── 召回为空：区分"真没有"与"被权限滤光"（计划书 难点 3），不调 LLM，零生成成本
-    if (chunks.length === 0) {
-      const existsSomewhere = await this.retrieval.contrastExists(question, scope);
-      const answer = existsSomewhere ? PERMISSION_FILTERED_ANSWER : NO_EVIDENCE_ANSWER;
-      await this.persistPair(conv.id, question, answer, [], messageId, result, Date.now() - t0, 'completed');
-      if (existsSomewhere) {
-        sink.delta(answer);
-        sink.citations([]);
-        sink.usage(EMPTY_USAGE);
-        sink.done({ latencyMs: Date.now() - t0 });
-      } else {
-        sink.error({ code: ErrorCodes.NO_EVIDENCE, message: '知识库中没有找到依据', retrieval: { hitCount: 0 } });
+    if (mode === 'rag') {
+      // ── 检索（权限 WHERE 前置 → 双路 → RRF → rerank）；topK 透传给检索层，meta 与实际召回一致
+      let result: RetrievalResult;
+      try {
+        result = await this.retrieval.retrieve(question, scope, { debug: true, topKFinal: topK });
+      } catch (err) {
+        this.logger.error('retrieval failed', { err: String(err) });
+        sink.open({ messageId, requestId, retrieval: zeroMeta });
+        sink.error({ code: ErrorCodes.UPSTREAM_ERROR, message: '检索服务异常，请稍后重试', retryable: true });
+        await this.metering.release(user.userId);
+        return;
       }
-      await this.metering.release(user.userId);
-      return;
+      chunks = result.chunks;
+      degraded = result.degraded;
+      hitCount = result.hitCount;
+      retrievalMs = result.latencyMs;
+      debug = result.debug;
+
+      sink.open({
+        messageId,
+        requestId,
+        retrieval: { topK, hitCount, rerankDegraded: degraded, latencyMs: retrievalMs, mode },
+      });
+
+      await this.queryLog.write({
+        userId: user.userId,
+        deptId: user.deptId,
+        query: question,
+        scene: 'qa',
+        accessFilter: { deptId: user.deptId, isAdmin: user.role === 'admin' },
+        hitCount,
+        vectorTop: debug?.vectorTop ?? null,
+        ftsTop: debug?.ftsTop ?? null,
+        fusedTop: debug?.fusedTop ?? null,
+        rerankedTop: debug?.rerankedTop ?? null,
+        rerankDegraded: degraded,
+        latencyBreakdown: debug?.breakdown ?? null,
+        totalMs: result.latencyMs,
+        requestId,
+      });
+
+      // ── 召回为空：区分"真没有"与"被权限滤光"（计划书 难点 3），不调 LLM，零生成成本
+      if (chunks.length === 0) {
+        const existsSomewhere = await this.retrieval.contrastExists(question, scope);
+        const answer = existsSomewhere ? PERMISSION_FILTERED_ANSWER : NO_EVIDENCE_ANSWER;
+        await this.persistPair(conv.id, question, answer, [], messageId, result, Date.now() - t0, 'completed');
+        if (existsSomewhere) {
+          sink.delta(answer);
+          sink.citations([]);
+          sink.usage(EMPTY_USAGE);
+          sink.done({ latencyMs: Date.now() - t0 });
+        } else {
+          sink.error({ code: ErrorCodes.NO_EVIDENCE, message: '知识库中没有找到依据', retrieval: { hitCount: 0 } });
+        }
+        await this.metering.release(user.userId);
+        return;
+      }
+    } else {
+      // ── 纯对话：跳过检索 / 权限范围 / rerank，直接进入生成（回答不挂靠知识库，无引用）
+      sink.open({ messageId, requestId, retrieval: { ...zeroMeta, mode } });
+      await this.queryLog.write({
+        userId: user.userId,
+        deptId: user.deptId,
+        query: question,
+        scene: 'qa',
+        accessFilter: { deptId: user.deptId, isAdmin: user.role === 'admin', mode },
+        hitCount: 0,
+        requestId,
+      });
     }
 
     // ── 资料侧消毒：LLM 上下文用净化版（间接注入的指令不进模型），citations 仍引用原文供人工核对
+    // chat 模式没有资料块，此段自然空转
     const interceptedChunks: string[] = [];
-    const chunksForPrompt = chunks.map((c) => {
-      const { content, intercepted } = sanitizeChunkContent(c.content);
-      if (intercepted) interceptedChunks.push(c.chunkId);
-      return { ...c, content };
-    });
+    const chunksForPrompt =
+      mode === 'rag'
+        ? chunks.map((c) => {
+            const { content, intercepted } = sanitizeChunkContent(c.content);
+            if (intercepted) interceptedChunks.push(c.chunkId);
+            return { ...c, content };
+          })
+        : [];
     if (interceptedChunks.length) {
       this.logger.warn(`injection intercepted in retrieved chunks: ${interceptedChunks.join(',')}`);
     }
@@ -244,7 +284,10 @@ export class QaService {
     // ── 历史与多轮压缩（超 HISTORY_MAX_TURNS 轮摘要化，稳定前缀 KV-cache 友好）
     const { history, summary } = await this.loadHistory(conv.id, conv.summary, user);
 
-    const messages = buildRagPrompt(question, chunksForPrompt, history, summary);
+    const messages =
+      mode === 'chat'
+        ? buildChatPrompt(question, history, summary)
+        : buildRagPrompt(question, chunksForPrompt, history, summary);
     const snapshot = {
       topK,
       hitCount,
@@ -270,8 +313,11 @@ export class QaService {
           sink.delta(t);
         },
       });
-      // 引用校验用原始 chunks（编号/原文对应），消毒只影响 LLM 上下文
-      const { answer, citations } = validateCitations(streamResult.content, chunks, (w) => this.logger.warn(w));
+      // 引用校验用原始 chunks（编号/原文对应），消毒只影响 LLM 上下文；chat 模式不产出引用
+      const { answer, citations } =
+        mode === 'rag'
+          ? validateCitations(streamResult.content, chunks, (w) => this.logger.warn(w))
+          : { answer: streamResult.content, citations: [] as CitationDto[] };
       const settle = await this.metering.settle({
         userId: user.userId,
         deptId: user.deptId,

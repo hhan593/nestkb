@@ -14,7 +14,6 @@ import { QaService, QaStreamSink } from './qa.service';
  * 客户端断开 → req close → AbortController → 上游 LlmModule 取消 → 部分结算。
  */
 @Controller('qa')
-@UseGuards(QaRateLimitGuard)
 export class QaController {
   constructor(
     private readonly qa: QaService,
@@ -44,6 +43,8 @@ export class QaController {
 
   @Post('conversations/:id/messages')
   @HttpCode(HttpStatus.OK)
+  // 限流只挂提问：会话列表/详情是纯读操作，不应消耗提问配额（否则每次发消息后的列表刷新都在扣额度）
+  @UseGuards(QaRateLimitGuard)
   async ask(
     @Req() req: FastifyRequest,
     @Res() res: FastifyReply,
@@ -96,6 +97,7 @@ export class QaController {
         user,
         question: dto.question,
         topK: dto.topK,
+        mode: dto.mode,
         requestId,
         signal: abort.signal,
         sink,

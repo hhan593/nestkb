@@ -48,6 +48,7 @@ export default function Chat() {
   const [activeConv, setActiveConv] = useState<string | null>(null);
   const [messages, setMessages] = useState<LiveMessage[]>([]);
   const [input, setInput] = useState('');
+  const [mode, setMode] = useState<'rag' | 'chat'>('rag');
   const [streaming, setStreaming] = useState(false);
   const [convLoading, setConvLoading] = useState(false);
   const [fbTarget, setFbTarget] = useState<{ messageId: string; x: number; y: number } | null>(null);
@@ -174,7 +175,7 @@ export default function Chat() {
     };
 
     try {
-      const res = await apiStream(`/qa/conversations/${convId}/messages`, { question }, controller.signal);
+      const res = await apiStream(`/qa/conversations/${convId}/messages`, { question, mode }, controller.signal);
       for await (const ev of parseSseStream(res, controller.signal)) {
         if (ev.event === 'meta') {
           const serverId = ev.data.messageId;
@@ -204,7 +205,7 @@ export default function Chat() {
       void refreshMe(); // 配额变化
       void loadConvs(); // 会话标题更新
     }
-  }, [input, streaming, activeConv, loadConvs, refreshMe]);
+  }, [input, streaming, activeConv, loadConvs, refreshMe, mode]);
 
   const stop = useCallback(() => {
     abortRef.current?.abort();
@@ -265,8 +266,12 @@ export default function Chat() {
             {messages.length === 0 && !convLoading && (
               <div className="empty" style={{ marginTop: 80 }}>
                 <FileSearch />
-                <div className="empty-title">问一个制度问题</div>
-                <div>回答基于本部门可见的知识库文档，每条结论都带出处。</div>
+                <div className="empty-title">{mode === 'chat' ? '随便聊聊' : '问一个制度问题'}</div>
+                <div>
+                  {mode === 'chat'
+                    ? '自由对话模式：不检索知识库，回答不带引用。'
+                    : '回答基于本部门可见的知识库文档，每条结论都带出处。'}
+                </div>
               </div>
             )}
             {convLoading && <div className="spinner" style={{ margin: '40px auto' }} />}
@@ -282,6 +287,19 @@ export default function Chat() {
         </div>
 
         <div className="chat-inputbar">
+          <div style={{ display: 'flex', gap: 6, maxWidth: 760, margin: '0 auto 8px', width: '100%' }}>
+            {(['rag', 'chat'] as const).map((m) => (
+              <button
+                key={m}
+                className={`btn btn-sm ${mode === m ? 'btn-primary' : 'btn-ghost'}`}
+                onClick={() => setMode(m)}
+                disabled={streaming}
+                title={m === 'rag' ? '检索本部门知识库，答案带引用出处' : '不检索知识库，直接与模型对话'}
+              >
+                {m === 'rag' ? '知识库问答' : '自由对话'}
+              </button>
+            ))}
+          </div>
           <div className="chat-inputbox">
             <textarea
               rows={1}
@@ -306,7 +324,11 @@ export default function Chat() {
               </button>
             )}
           </div>
-          <div className="chat-hintline">回答仅基于知识库可见文档 · 引用可点开核对原文 · 无依据时会明确拒答</div>
+          <div className="chat-hintline">
+            {mode === 'chat'
+              ? '自由对话 · 不检索知识库 · 回答无出处，请自行核实'
+              : '回答仅基于知识库可见文档 · 引用可点开核对原文 · 无依据时会明确拒答'}
+          </div>
         </div>
       </div>
 
@@ -340,6 +362,7 @@ function MessageView({ m, fb, onFeedback }: { m: LiveMessage; fb?: 'up' | 'down'
       <div className="msg-role">
         <span className="msg-role-dot">K</span>
         <span>NestKB</span>
+        {m.meta?.mode === 'chat' && <span>· 自由对话</span>}
         {m.meta && m.meta.hitCount > 0 && <span>· 检索 {m.meta.hitCount} 块 · {m.meta.latencyMs}ms</span>}
         {m.meta?.rerankDegraded && <span className="badge badge-warn">rerank 降级</span>}
         {m.usage && <span className="num">· {fmtCost(m.usage.costEstimated)} 元</span>}

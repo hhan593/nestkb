@@ -1,4 +1,4 @@
-import { IsInt, IsOptional, IsString, Length, Max, Min } from 'class-validator';
+import { IsIn, IsInt, IsOptional, IsString, Length, Max, Min } from 'class-validator';
 
 export class AskDto {
   @IsString()
@@ -10,6 +10,11 @@ export class AskDto {
   @Min(1)
   @Max(20)
   topK?: number;
+
+  /** rag：知识库检索增强（默认）；chat：纯对话，不检索不带引用 */
+  @IsOptional()
+  @IsIn(['rag', 'chat'])
+  mode?: 'rag' | 'chat';
 }
 
 export class CreateConversationDto {

@@ -63,7 +63,9 @@ async function main(): Promise<void> {
   const embedder =
     env.embedding.provider === 'mock'
       ? new MockEmbeddingProvider(env)
-      : new OpenAICompatEmbeddingProvider(env.embedding, env.embedding.dim);
+      : new OpenAICompatEmbeddingProvider(env.embedding, env.embedding.dim, {
+          sendDimensions: env.embedding.sendDimensions,
+        });
   try {
     const [vec] = await embedder.embed(['知识库连通性探针']);
     const dimOk = vec?.length === env.embedding.dim;

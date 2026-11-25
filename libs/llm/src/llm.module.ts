@@ -29,7 +29,9 @@ import type { LlmChatProvider, LlmEmbeddingProvider, RerankProvider } from './pr
       useFactory: (env: AppEnv): LlmEmbeddingProvider =>
         env.embedding.provider === 'mock'
           ? new MockEmbeddingProvider(env)
-          : new OpenAICompatEmbeddingProvider(env.embedding, env.embedding.dim),
+          : new OpenAICompatEmbeddingProvider(env.embedding, env.embedding.dim, {
+              sendDimensions: env.embedding.sendDimensions,
+            }),
       inject: [ENV],
     },
     {

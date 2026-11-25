@@ -12,13 +12,16 @@ export type QaEvent =
 export async function* parseSseStream(res: Response, signal?: AbortSignal): AsyncGenerator<QaEvent> {
   if (!res.ok || !res.body) {
     let message = `请求失败（${res.status}）`;
+    let code = 'HTTP_ERROR';
     try {
-      const body = (await res.json()) as { message?: string };
+      // 后端错误体形如 { code: 'RATE_LIMITED', message: '...' }：沿用真实 code，前端才能给出准确提示
+      const body = (await res.json()) as { code?: string; message?: string };
       if (body.message) message = body.message;
+      if (body.code) code = body.code;
     } catch {
       // 保留默认消息
     }
-    yield { event: 'error', data: { code: 'HTTP_ERROR', message } };
+    yield { event: 'error', data: { code, message } };
     return;
   }
   const reader = res.body.getReader();

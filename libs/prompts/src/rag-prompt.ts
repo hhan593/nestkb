@@ -46,6 +46,31 @@ export const NO_EVIDENCE_ANSWER = '根据现有资料无法回答：知识库中
 export const PERMISSION_FILTERED_ANSWER =
   '知识库中存在可能相关的内容，但您当前没有访问权限。如需查阅，请联系文档归属部门申请授权。';
 
+/** 纯对话模式系统提示：不挂靠知识库，明确告知用户此处回答无出处 */
+export const CHAT_SYSTEM_PROMPT = `你是 NestKB 的通用 AI 助手，当前处于「自由对话」模式：本轮回答不检索企业知识库，也不提供引用编号。请遵循：
+1. 用你自己的知识直接回答，不要声称引用了内部资料，不要编造文档名、编号或出处；
+2. 涉及企业制度、流程、条款等内部信息时，提醒用户切到「知识库问答」模式以获得带出处的答案；
+3. 不确定的内容直接说明不确定，不臆测具体数字、日期与条款。`;
+
+/**
+ * 纯对话 prompt：仅 system + 历史 + 当前问题。
+ * history 里可能已含本轮问题（QaService 先落库 user 消息再读历史），重复时不再追加。
+ */
+export function buildChatPrompt(
+  question: string,
+  history: ChatMessage[] = [],
+  summary?: string | null,
+): ChatMessage[] {
+  const msgs: ChatMessage[] = [{ role: 'system', content: CHAT_SYSTEM_PROMPT }];
+  if (summary) msgs.push({ role: 'system', content: `此前对话摘要：\n${summary}` });
+  msgs.push(...history);
+  const last = history[history.length - 1];
+  if (!(last && last.role === 'user' && last.content === question)) {
+    msgs.push({ role: 'user', content: question });
+  }
+  return msgs;
+}
+
 /** 压缩策略：只保留最近 keepRecent*2 条（摘要文本由调用方生成后经 summary 传入稳定前缀） */
 export function compressHistory(history: ChatMessage[], keepRecent: number): ChatMessage[] {
   const keep = Math.max(1, keepRecent) * 2;

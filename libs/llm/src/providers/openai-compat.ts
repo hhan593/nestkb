@@ -133,6 +133,7 @@ export class OpenAICompatEmbeddingProvider implements LlmEmbeddingProvider {
   constructor(
     private readonly cfg: ProviderConfig,
     readonly dim: number,
+    private readonly opts: { sendDimensions?: boolean } = {},
   ) {}
 
   get model(): string {
@@ -144,7 +145,12 @@ export class OpenAICompatEmbeddingProvider implements LlmEmbeddingProvider {
       method: 'POST',
       headers: headers(this.cfg.apiKey),
       signal,
-      body: JSON.stringify({ model: this.cfg.model, input: texts }),
+      // dimensions 是 OpenAI 扩展参数，不支持的厂商会 400 —— 仅在 EMBEDDING_SEND_DIMENSIONS 显式开启时下发
+      body: JSON.stringify({
+        model: this.cfg.model,
+        input: texts,
+        ...(this.opts.sendDimensions ? { dimensions: this.dim } : {}),
+      }),
     }).catch((err: Error) => {
       throw new LlmUpstreamError(`connect failed: ${err.message}`, /ECONNRESET|ETIMEDOUT|fetch failed/i.test(err.message));
     });
@@ -177,7 +183,13 @@ export class OpenAICompatRerankProvider implements RerankProvider {
       throw new LlmUpstreamError(`connect failed: ${err.message}`, /ECONNRESET|ETIMEDOUT|fetch failed/i.test(err.message));
     });
     if (!resp.ok) throw await parseError(resp);
-    const json = (await resp.json()) as { results: Array<{ index: number; relevance_score: number }> };
-    return json.results.map((r) => ({ index: r.index, score: r.relevance_score }));
+    const json = (await resp.json()) as { results?: Array<{ index: number; relevance_score: number }> };
+    if (!Array.isArray(json.results)) throw new LlmUpstreamError('rerank response missing results[]', false);
+    // 部分厂商（如讯飞 MaaS）返回不排序、且可能忽略 top_n → 本地按分数降序并截断，保证进 prompt 的顺序可信
+    return json.results
+      .filter((r) => Number.isInteger(r.index) && r.index >= 0 && r.index < documents.length)
+      .map((r) => ({ index: r.index, score: r.relevance_score }))
+      .sort((a, b) => b.score - a.score)
+      .slice(0, topN);
   }
 }

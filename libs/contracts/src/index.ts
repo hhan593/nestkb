@@ -44,11 +44,16 @@ export interface CitationDto {
   possiblyOutdated: boolean;
 }
 
+/** 问答模式：rag = 知识库检索增强（默认）；chat = 纯对话（不检索、无引用） */
+export type QaMode = 'rag' | 'chat';
+
 export interface RetrievalMetaDto {
   topK: number;
   hitCount: number;
   rerankDegraded: boolean;
   latencyMs: number;
+  /** 缺省视为 rag（兼容旧客户端与历史会话快照） */
+  mode?: QaMode;
 }
 
 export interface UsageDto {

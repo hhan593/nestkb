@@ -17,6 +17,8 @@ export interface RetrievalMetaDto {
   hitCount: number;
   rerankDegraded: boolean;
   latencyMs: number;
+  /** rag = 知识库检索增强；chat = 纯对话（缺省视为 rag） */
+  mode?: 'rag' | 'chat';
 }
 
 export interface UsageDto {
