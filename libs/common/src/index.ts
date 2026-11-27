@@ -3,6 +3,7 @@ export * from './config/env.module';
 export * from './trace/trace';
 export * from './logging/logger';
 export * from './redis/redis.service';
+export * from './redis/semantic-cache';
 export * from './http/http-commons';
 export * from './http/upload';
 export * from './common.module';
