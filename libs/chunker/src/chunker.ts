@@ -5,6 +5,8 @@
  * 第三层：超长段落递归下切，从粗到细分隔符，带尾部重叠。
  */
 
+import { estimateTokens } from '@lib/contracts';
+
 export interface ChunkDraft {
   content: string;
   chunkNo: number;
@@ -37,7 +39,7 @@ export function chunkDocument(text: string, opts: ChunkOptions = {}): ChunkDraft
       chunkNo: out.length,
       headingPath: heading,
       isTable,
-      tokenEstimate: Math.ceil(trimmed.length / 1.6),
+      tokenEstimate: estimateTokens(trimmed.length),
     });
   };
 

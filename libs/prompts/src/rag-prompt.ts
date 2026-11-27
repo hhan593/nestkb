@@ -16,6 +16,15 @@ export function fmtDate(iso: string | null): string {
 }
 
 /**
+ * 历史末条可能已是本轮问题：QaService 先落库 user 消息、再读历史，于是本轮问题会连同资料一起重复一次。
+ * 同一句问题进两次 prompt 既多算 token，也容易出现连续两条 user 消息这种不合规结构（#28）。
+ */
+function withoutTrailingEcho(history: ChatMessage[], question: string): ChatMessage[] {
+  const last = history[history.length - 1];
+  return last && last.role === 'user' && last.content === question ? history.slice(0, -1) : history;
+}
+
+/**
  * 上下文块带编号 + 来源元数据（文档/版本/章节/时效）——引用展示层的全部信息从这里来。
  * 历史 > HISTORY_MAX_TURNS 轮由 QaService 先摘要化，此处只接收压缩后的稳定前缀（KV-cache 友好）。
  */
@@ -35,7 +44,8 @@ export function buildRagPrompt(
   if (summary) {
     msgs.push({ role: 'system', content: `此前对话摘要（仅供理解上下文；回答依据仍只能是下方资料）：\n${summary}` });
   }
-  msgs.push(...history);
+  // 本轮问题的最终载体是下面带【参考资料】的那条，历史里的回声先去掉
+  msgs.push(...withoutTrailingEcho(history, question));
   msgs.push({ role: 'user', content: `【参考资料】\n${material}\n\n【问题】${question}` });
   return msgs;
 }
@@ -45,6 +55,13 @@ export const NO_EVIDENCE_ANSWER = '根据现有资料无法回答：知识库中
 
 export const PERMISSION_FILTERED_ANSWER =
   '知识库中存在可能相关的内容，但您当前没有访问权限。如需查阅，请联系文档归属部门申请授权。';
+
+/**
+ * 空召回的第二档兜底：当前账号全程看不到任何文档切片（还没上传 / 全被部门墙挡住 / 都已过期）。
+ * 与 NO_EVIDENCE_ANSWER 区分开，避免把「库里对你就没东西」说成「这个问题没依据」（#24）。
+ */
+export const NO_VISIBLE_DOCS_ANSWER =
+  '知识库中暂时没有您可以访问的文档，因此无法回答该问题。请联系管理员上传资料或为您所在的部门授权。';
 
 /** 纯对话模式系统提示：不挂靠知识库，明确告知用户此处回答无出处 */
 export const CHAT_SYSTEM_PROMPT = `你是 NestKB 的通用 AI 助手，当前处于「自由对话」模式：本轮回答不检索企业知识库，也不提供引用编号。请遵循：
@@ -63,11 +80,8 @@ export function buildChatPrompt(
 ): ChatMessage[] {
   const msgs: ChatMessage[] = [{ role: 'system', content: CHAT_SYSTEM_PROMPT }];
   if (summary) msgs.push({ role: 'system', content: `此前对话摘要：\n${summary}` });
-  msgs.push(...history);
-  const last = history[history.length - 1];
-  if (!(last && last.role === 'user' && last.content === question)) {
-    msgs.push({ role: 'user', content: question });
-  }
+  msgs.push(...withoutTrailingEcho(history, question));
+  msgs.push({ role: 'user', content: question });
   return msgs;
 }
 

@@ -7,9 +7,11 @@ import {
   RetrievalMetaDto,
   RetrievedChunk,
   UsageDto,
+  estimateTokens,
 } from '@lib/contracts';
 import {
   NO_EVIDENCE_ANSWER,
+  NO_VISIBLE_DOCS_ANSWER,
   PERMISSION_FILTERED_ANSWER,
   buildChatPrompt,
   buildRagPrompt,
@@ -151,6 +153,7 @@ export class QaService {
           degraded: false,
           hitCount: 0,
           latencyMs: Date.now() - t0,
+          breakdown: { embedMs: 0, vectorMs: 0, ftsMs: 0, fuseMs: 0, rerankMs: 0 },
         }, Date.now() - t0, 'completed');
         if (!conv.title) await this.prisma.conversation.update({ where: { id: conv.id }, data: { title: question.slice(0, 30) } });
         await this.queryLog.write({
@@ -167,10 +170,7 @@ export class QaService {
 
     // ── 预扣：两种模式都要过成本闸；chat 无资料块，预估只含问题 + 历史 + 预留输出
     const topK = opts.topK ?? this.env.retrieval.topKFinal;
-    const estPromptTokens =
-      mode === 'chat'
-        ? Math.ceil((question.length + 1500) / 1.6)
-        : Math.ceil((question.length + topK * 500) / 1.6);
+    const estPromptTokens = estimateTokens(question.length + (mode === 'chat' ? 1500 : topK * 500));
     try {
       await this.metering.preDeduct(user.userId, user.deptId, estPromptTokens);
     } catch (err) {
@@ -183,31 +183,63 @@ export class QaService {
       return;
     }
 
+    // 预扣成功后必须保证有出口释放：任何未走到结算的路径（检索/落库/摘要化抛错）都由这里的 finally 兜底。
+    // 否则 Redis 预留键要等 TTL(300s) 才过期，期间该用户所有提问都会 429「上一笔问答尚未结算」。
+    const reservation = { active: true };
+    try {
+      await this.runAnswer(opts, { conv, mode, messageId, zeroMeta, topK, estPromptTokens, t0, reservation });
+    } finally {
+      if (reservation.active) await this.metering.release(user.userId).catch(() => undefined);
+    }
+  }
+
+  /** 问答主体（预扣之后）：所有退出路径要么结算（自身释放），要么由 ask() 的 finally 释放 */
+  private async runAnswer(
+    opts: AskOptions,
+    ctx: {
+      conv: { id: string; title: string | null; summary: string | null };
+      mode: QaMode;
+      messageId: string;
+      zeroMeta: RetrievalMetaDto;
+      topK: number;
+      estPromptTokens: number;
+      t0: number;
+      reservation: { active: boolean };
+    },
+  ): Promise<void> {
+    const { user, question, sink, requestId } = opts;
+    const { conv, mode, messageId, zeroMeta, topK, estPromptTokens, t0, reservation } = ctx;
+    /** 提前退出时释放预扣键（幂等：已释放则跳过） */
+    const releaseReservation = async (): Promise<void> => {
+      if (!reservation.active) return;
+      reservation.active = false;
+      await this.metering.release(user.userId).catch(() => undefined);
+    };
+
     const scope: AccessScope = { userId: user.userId, deptId: user.deptId, isAdmin: user.role === 'admin' };
     // 两种模式的差异只收在这几个变量上：chat 恒为空召回、无引用、无 rerank 降级
     let chunks: RetrievedChunk[] = [];
     let degraded = false;
     let hitCount = 0;
     let retrievalMs = 0;
-    let debug: RetrievalResult['debug'];
 
     if (mode === 'rag') {
       // ── 检索（权限 WHERE 前置 → 双路 → RRF → rerank）；topK 透传给检索层，meta 与实际召回一致
       let result: RetrievalResult;
       try {
-        result = await this.retrieval.retrieve(question, scope, { debug: true, topKFinal: topK });
+        // 常规问答不要 debug 明细：它每次都会拉可见版本集合、并把 4 份 top10 JSON 写进 query_logs（#32）
+        result = await this.retrieval.retrieve(question, scope, { topKFinal: topK });
       } catch (err) {
         this.logger.error('retrieval failed', { err: String(err) });
         sink.open({ messageId, requestId, retrieval: zeroMeta });
         sink.error({ code: ErrorCodes.UPSTREAM_ERROR, message: '检索服务异常，请稍后重试', retryable: true });
-        await this.metering.release(user.userId);
+        await releaseReservation();
         return;
       }
       chunks = result.chunks;
       degraded = result.degraded;
       hitCount = result.hitCount;
       retrievalMs = result.latencyMs;
-      debug = result.debug;
 
       sink.open({
         messageId,
@@ -222,22 +254,27 @@ export class QaService {
         scene: 'qa',
         accessFilter: { deptId: user.deptId, isAdmin: user.role === 'admin' },
         hitCount,
-        vectorTop: debug?.vectorTop ?? null,
-        ftsTop: debug?.ftsTop ?? null,
-        fusedTop: debug?.fusedTop ?? null,
-        rerankedTop: debug?.rerankedTop ?? null,
+        // top10 明细只在 /admin/retrieval/debug 落库；常规问答留分段耗时即可定位慢在哪一段
         rerankDegraded: degraded,
-        latencyBreakdown: debug?.breakdown ?? null,
+        latencyBreakdown: result.breakdown,
         totalMs: result.latencyMs,
         requestId,
       });
 
-      // ── 召回为空：区分"真没有"与"被权限滤光"（计划书 难点 3），不调 LLM，零生成成本
+      // ── 召回为空：三态分流（计划书 难点 3），不调 LLM，零生成成本
+      //    ① 库里没有你可访问的文档 → 说明可见范围，不暗示"问题没依据"
+      //    ② 有可见文档且库中存在相似内容（同模型、当前版本、达相似度下限）→ 才是"无权限"
+      //    ③ 其余（如「你好」这类无关提问）→ 无依据
       if (chunks.length === 0) {
-        const existsSomewhere = await this.retrieval.contrastExists(question, scope);
-        const answer = existsSomewhere ? PERMISSION_FILTERED_ANSWER : NO_EVIDENCE_ANSWER;
+        const hasVisible = await this.retrieval.hasVisibleDocuments(scope);
+        const permissionFiltered = hasVisible && (await this.retrieval.contrastExists(question, scope));
+        const answer = permissionFiltered
+          ? PERMISSION_FILTERED_ANSWER
+          : hasVisible
+            ? NO_EVIDENCE_ANSWER
+            : NO_VISIBLE_DOCS_ANSWER;
         await this.persistPair(conv.id, question, answer, [], messageId, result, Date.now() - t0, 'completed');
-        if (existsSomewhere) {
+        if (permissionFiltered || !hasVisible) {
           sink.delta(answer);
           sink.citations([]);
           sink.usage(EMPTY_USAGE);
@@ -245,7 +282,7 @@ export class QaService {
         } else {
           sink.error({ code: ErrorCodes.NO_EVIDENCE, message: '知识库中没有找到依据', retrieval: { hitCount: 0 } });
         }
-        await this.metering.release(user.userId);
+        await releaseReservation();
         return;
       }
     } else {
@@ -318,6 +355,7 @@ export class QaService {
         mode === 'rag'
           ? validateCitations(streamResult.content, chunks, (w) => this.logger.warn(w))
           : { answer: streamResult.content, citations: [] as CitationDto[] };
+      reservation.active = false; // settle 内部（含落库失败）必定释放预扣键，避免 finally 误删下一次请求的预留键
       const settle = await this.metering.settle({
         userId: user.userId,
         deptId: user.deptId,
@@ -363,7 +401,8 @@ export class QaService {
           latencyMs: Date.now() - t0,
         },
       });
-      // 按已产生 token 部分结算（防漂移）
+      // 按已产生 token 部分结算（防漂移）；settlePartial 内部同样保证释放预扣键
+      reservation.active = false;
       await this.metering
         .settlePartial({
           userId: user.userId,
@@ -391,7 +430,8 @@ export class QaService {
     return visible >= docIds.length;
   }
 
-  private async persistPair(    conversationId: string,
+  private async persistPair(
+    conversationId: string,
     question: string,
     answer: string,
     citations: CitationDto[],

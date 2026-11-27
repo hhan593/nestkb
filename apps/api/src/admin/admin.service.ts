@@ -1,5 +1,6 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
+import { monthStartUtc8 } from '@lib/contracts';
 import { AppEnv, ENV } from '@app/common';
 import { PrismaService } from '@app/prisma';
 
@@ -111,7 +112,7 @@ export class AdminService {
     for (const d of depts) {
       const agg = await this.prisma.usageRecord.aggregate({
         _sum: { costEstimated: true },
-        where: { deptId: d.id, createdAt: { gte: monthStart() } },
+        where: { deptId: d.id, createdAt: { gte: monthStartUtc8() } },
       });
       const used = Number(agg._sum.costEstimated ?? 0);
       const quota = Number(d.quotaMonth);
@@ -154,6 +155,4 @@ function keyOf(record: GroupRow, groupBy: string[]): string {
   return String(record[groupBy[0] as keyof GroupRow] ?? '');
 }
 
-function monthStart(now = new Date()): Date {
-  return new Date(now.getFullYear(), now.getMonth(), 1);
-}
+

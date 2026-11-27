@@ -1,4 +1,5 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
+import { monthStartUtc8 } from '@lib/contracts';
 import { PrismaService } from '@app/prisma';
 
 @Injectable()
@@ -17,7 +18,7 @@ export class UsersService {
     const dept = await this.prisma.department.findUniqueOrThrow({ where: { id: deptId } });
     const agg = await this.prisma.usageRecord.aggregate({
       _sum: { costEstimated: true },
-      where: { deptId, createdAt: { gte: monthStart() } },
+      where: { deptId, createdAt: { gte: monthStartUtc8() } },
     });
     return Number((Number(dept.quotaMonth) - Number(agg._sum.costEstimated ?? 0)).toFixed(4));
   }
@@ -40,8 +41,4 @@ export class UsersService {
       },
     };
   }
-}
-
-export function monthStart(now = new Date()): Date {
-  return new Date(now.getFullYear(), now.getMonth(), 1);
 }

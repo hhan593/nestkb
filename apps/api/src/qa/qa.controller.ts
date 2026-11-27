@@ -65,6 +65,13 @@ export class QaController {
     req.raw.on('close', onDisconnect);
     req.raw.on('aborted', onDisconnect);
     req.socket.on('close', onDisconnect);
+    // keep-alive 会复用同一个 socket：不摘监听器的话每次提问都往 socket 上叠 3 个，
+    // 后续请求断开时可能连带 abort 早已结束的旧请求（#27）
+    const detachDisconnectListeners = (): void => {
+      req.raw.off('close', onDisconnect);
+      req.raw.off('aborted', onDisconnect);
+      req.socket.off('close', onDisconnect);
+    };
 
     let metaSent = false;
     const write = (ev: QaSseEvent): void => {
@@ -73,7 +80,8 @@ export class QaController {
     };
     const sink: QaStreamSink = {
       open: (meta) => {
-        if (metaSent) return;
+        // 客户端已断就别再写头：向已关闭的连接 writeHead 只会留下无意义的错误栈
+        if (metaSent || closed || res.raw.writableEnded) return;
         metaSent = true;
         res.raw.writeHead(200, {
           'Content-Type': 'text/event-stream; charset=utf-8',
@@ -91,6 +99,9 @@ export class QaController {
       error: (d) => write({ event: 'error', data: d }),
     };
 
+    /** 未开流就抛语义化异常：响应体交给全局过滤器，本方法不得抢先 end（否则客户端拿到空响应） */
+    let delegateToFilter = false;
+
     try {
       await this.qa.ask({
         conversationId,
@@ -105,7 +116,10 @@ export class QaController {
     } catch (err) {
       // 尚未开流且是语义化异常（404 会话不存在 / 429 限流等）：保留原状态码交给全局过滤器，
       // 不再一律吞成 200 + UPSTREAM_ERROR
-      if (!metaSent && err instanceof HttpException) throw err;
+      if (!metaSent && err instanceof HttpException) {
+        delegateToFilter = true;
+        throw err;
+      }
       // 已开流的兜底：确保客户端总能收到终止事件
       sink.open({
         messageId: '',
@@ -115,7 +129,10 @@ export class QaController {
       sink.error({ code: 'UPSTREAM_ERROR', message: '服务内部错误', retryable: true });
       void err;
     } finally {
-      res.raw.end();
+      detachDisconnectListeners();
+      // 交给过滤器时不要 end：fastify 的 reply.sent 就是 raw.writableEnded，
+      // 一旦 end 过滤器会认为"已响应"而跳过，404 就退化成空 body
+      if (!delegateToFilter) res.raw.end();
     }
   }
 }

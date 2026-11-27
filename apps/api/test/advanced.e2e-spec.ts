@@ -17,6 +17,15 @@ process.env.QA_REQUEST_LIMIT_PER_MIN ??= '100';
  * T02 白名单授权 / T06 过期文档 / T07 版本替换 / T08 rerank 降级 / T09 SSE 中断 / T12 配额耗尽。
  */
 describe('RAG 进阶用例 E2E', () => {
+  it('非法 grant 参数返回 400 而非 500（DTO 校验生效，#33）', async () => {
+    // 不需要真实文档：DTO 层先拒绝，非法 subjectType / 非 UUID subjectId 都不该落到 Prisma
+    const res = await request(base)
+      .post('/admin/documents/00000000-0000-0000-0000-000000000000/grants')
+      .set('Authorization', `Bearer ${admin}`)
+      .send({ subjectType: 'group', subjectId: 'not-a-uuid' });
+    expect(res.status).toBe(400);
+  });
+
   let app: NestFastifyApplication;
   let base: string;
   let worker: { init(): Promise<unknown>; close(): Promise<unknown> };

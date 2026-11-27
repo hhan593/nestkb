@@ -5,6 +5,7 @@ import { useAuth } from '../lib/auth';
 import {
   ACCESS_LEVEL_LABEL,
   fmtDate,
+  fmtTime,
   STAGE_LABEL,
   type DocumentRow,
   type VersionDto,
@@ -386,7 +387,7 @@ function GrantsDialog({ doc, depts, onClose }: { doc: DocumentRow; depts: Array<
                 <div className="version-no">{g.subjectType === 'dept' ? '部门' : '用户'}</div>
                 <div style={{ flex: 1, fontSize: 13 }}>
                   <span className="mono">{g.subjectId.slice(0, 8)}…</span>
-                  {g.expiresAt && <span style={{ color: 'var(--ink-3)', marginLeft: 8 }}>至 {new Date(g.expiresAt).toLocaleString('zh-CN')}</span>}
+                  {g.expiresAt && <span style={{ color: 'var(--ink-3)', marginLeft: 8 }}>至 {fmtTime(g.expiresAt)}</span>}
                 </div>
               </div>
             ))}

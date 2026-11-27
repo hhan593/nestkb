@@ -49,11 +49,20 @@ services:
       LLM_RERANK_BASE_URL: ${LLM_RERANK_BASE_URL:-}
       LLM_RERANK_API_KEY: ${LLM_RERANK_API_KEY:-}
       LLM_RERANK_MODEL: ${LLM_RERANK_MODEL:-mock-reranker}
+      # 生产默认禁桩：上面若仍是 mock 而又没显式放行，容器启动即失败（不会静默降级）
+      LLM_ALLOW_MOCK_IN_PROD: ${LLM_ALLOW_MOCK_IN_PROD:-false}
       PRICE_JSON: ${PRICE_JSON:-{"mock-chat":{"input":2,"output":8},"mock-embedding":{"input":0.5},"mock-reranker":{"per_call":0.001}}}
     volumes: [uploads:/app/data/uploads]
     depends_on:
       postgres: { condition: service_healthy }
       redis: { condition: service_healthy }
+    healthcheck:
+      # /health 同时校验 DB 与暴露实际 provider（503 = DB 不可达）
+      test: ['CMD', 'wget', '-qO-', 'http://127.0.0.1:3000/health']
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
     restart: unless-stopped
     mem_limit: 768m
 
@@ -73,6 +82,7 @@ services:
       LLM_EMBEDDING_PROVIDER: ${LLM_EMBEDDING_PROVIDER:-mock}
       LLM_EMBEDDING_API_KEY: ${LLM_EMBEDDING_API_KEY:-}
       LLM_EMBEDDING_MODEL: ${LLM_EMBEDDING_MODEL:-mock-embedding}
+      LLM_ALLOW_MOCK_IN_PROD: ${LLM_ALLOW_MOCK_IN_PROD:-false}
       PRICE_JSON: ${PRICE_JSON:-{"mock-embedding":{"input":0.5}}}
       NODE_OPTIONS: --max-old-space-size=640   # 大 PDF 解析峰值封顶，防整机 OOM
     volumes: [uploads:/app/data/uploads]

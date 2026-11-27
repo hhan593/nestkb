@@ -56,6 +56,8 @@ services:
       LLM_RERANK_BASE_URL: ${LLM_RERANK_BASE_URL:-}
       LLM_RERANK_API_KEY: ${LLM_RERANK_API_KEY:-}
       LLM_RERANK_MODEL: ${LLM_RERANK_MODEL:-mock-reranker}
+      # 生产默认禁桩：上面若仍是 mock 而又没显式放行，容器启动即失败（不会静默降级）
+      LLM_ALLOW_MOCK_IN_PROD: ${LLM_ALLOW_MOCK_IN_PROD:-false}
       PRICE_JSON: ${PRICE_JSON:-{}}
     volumes: [uploads:/app/data/uploads]
     depends_on:
@@ -63,7 +65,8 @@ services:
       redis: { condition: service_healthy }
     mem_limit: 320m
     healthcheck:
-      test: ['CMD', 'wget', '-qO-', '--header=Accept: text/html', 'http://127.0.0.1:3000/kb']
+      # /health 同时校验 DB 与暴露实际 provider（503 = DB 不可达）
+      test: ['CMD', 'wget', '-qO-', 'http://127.0.0.1:3000/health']
       interval: 15s
       timeout: 5s
       retries: 5
@@ -86,6 +89,7 @@ services:
       LLM_EMBEDDING_BASE_URL: ${LLM_EMBEDDING_BASE_URL:-}
       LLM_EMBEDDING_API_KEY: ${LLM_EMBEDDING_API_KEY:-}
       LLM_EMBEDDING_MODEL: ${LLM_EMBEDDING_MODEL:-mock-embedding}
+      LLM_ALLOW_MOCK_IN_PROD: ${LLM_ALLOW_MOCK_IN_PROD:-false}
       PRICE_JSON: ${PRICE_JSON:-{}}
     volumes: [uploads:/app/data/uploads]
     depends_on:

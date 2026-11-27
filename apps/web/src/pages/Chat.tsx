@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ArrowUp, MessageSquarePlus, Square, ThumbsDown, ThumbsUp, FileSearch, CircleAlert, X, Menu } from 'lucide-react';
 import { api, apiStream } from '../lib/api';
 import { parseSseStream } from '../lib/sse';
@@ -40,7 +40,11 @@ const ERROR_HINT: Record<string, string> = {
   INJECTION_BLOCKED: '该问题包含不允许的指令内容。',
   UPSTREAM_ERROR: '模型服务暂时不可用，可稍后重试。',
   HTTP_ERROR: '请求失败，请确认服务已启动。',
+  STREAM_INTERRUPTED: '连接中断，回答可能不完整。可点重试重新生成。',
 };
+
+/** 这些错误重试有意义（配额/注入拦截之类重试也是同样结果，不给入口） */
+const RETRYABLE_ERRORS = new Set(['STREAM_INTERRUPTED', 'UPSTREAM_ERROR', 'HTTP_ERROR', 'RATE_LIMITED']);
 
 export default function Chat() {
   const { me, refreshMe } = useAuth();
@@ -51,7 +55,8 @@ export default function Chat() {
   const [mode, setMode] = useState<'rag' | 'chat'>('rag');
   const [streaming, setStreaming] = useState(false);
   const [convLoading, setConvLoading] = useState(false);
-  const [fbTarget, setFbTarget] = useState<{ messageId: string; x: number; y: number } | null>(null);
+  // rating 必须由「点的是哪个按钮」决定：原来用「是否勾了原因」推导，先点👎勾原因、关掉再点👍会提交 down（#35）
+  const [fbTarget, setFbTarget] = useState<{ messageId: string; rating: 'up' | 'down'; x: number; y: number } | null>(null);
   const [fbReasons, setFbReasons] = useState<string[]>([]);
   const [fbComment, setFbComment] = useState('');
   const [fbDone, setFbDone] = useState<Record<string, 'up' | 'down'>>({});
@@ -63,9 +68,20 @@ export default function Chat() {
   const scrollRef = useRef<HTMLDivElement>(null);
   const messagesRef = useRef<LiveMessage[]>([]);
   messagesRef.current = messages;
+  // 输入框与流式状态走 ref：send/retry 因此不依赖每次按键都变的 input，
+  // 回调引用保持稳定，MessageView 的 memo 才真正生效（否则每帧 delta 都会重渲全部历史消息）
+  const inputRef = useRef(input);
+  inputRef.current = input;
+  const streamingRef = useRef(streaming);
+  streamingRef.current = streaming;
 
   const loadConvs = useCallback(async () => {
-    setConvs(await api<Conversation[]>('/qa/conversations'));
+    // 三处 void loadConvs() 都会吞掉 rejection：401/500 时会话列表静默为空，用户只看到"还没有会话"
+    try {
+      setConvs(await api<Conversation[]>('/qa/conversations'));
+    } catch (err) {
+      setPageError(err instanceof Error ? err.message : '加载会话列表失败');
+    }
   }, []);
 
   useEffect(() => {
@@ -141,9 +157,10 @@ export default function Chat() {
     }
   }, [loadConvs]);
 
-  const send = useCallback(async () => {
-    const question = input.trim();
-    if (!question || streaming) return;
+  /** override 供「重试」用：直接重放指定问题，而不是读输入框 */
+  const send = useCallback(async (override?: string) => {
+    const question = (override ?? inputRef.current).trim();
+    if (!question || streamingRef.current) return;
     let convId = activeConv;
     try {
       if (!convId) {
@@ -159,7 +176,7 @@ export default function Chat() {
       return;
     }
     setPageError(null);
-    setInput('');
+    if (override === undefined) setInput('');
     setStreaming(true);
     const userMsg: LiveMessage = { id: `u-${Date.now()}`, role: 'user', content: question, createdAt: new Date().toISOString() };
     const draftId = `a-${Date.now()}`;
@@ -182,6 +199,8 @@ export default function Chat() {
       setMessages(next);
     };
 
+    /** 是否收到过 done/error：没有终结事件就结束的流必须由前端兜底置为失败，否则气泡永远转圈（#29） */
+    let terminated = false;
     try {
       const res = await apiStream(`/qa/conversations/${convId}/messages`, { question, mode }, controller.signal);
       for await (const ev of parseSseStream(res, controller.signal)) {
@@ -196,10 +215,19 @@ export default function Chat() {
         } else if (ev.event === 'usage') {
           patch((m) => ({ ...m, usage: ev.data }));
         } else if (ev.event === 'done') {
+          terminated = true;
           patch((m) => ({ ...m, status: 'completed', latencyMs: ev.data.latencyMs }));
         } else if (ev.event === 'error') {
+          terminated = true;
           patch((m) => ({ ...m, status: 'failed', error: { code: ev.data.code, message: ev.data.message } }));
         }
+      }
+      if (!terminated && !controller.signal.aborted) {
+        patch((m) =>
+          m.status === 'streaming'
+            ? { ...m, status: 'failed', error: { code: 'STREAM_INTERRUPTED', message: '连接中断，回答可能不完整' } }
+            : m,
+        );
       }
     } catch (err) {
       if (!controller.signal.aborted) {
@@ -208,15 +236,47 @@ export default function Chat() {
         patch((m) => ({ ...m, status: 'aborted' }));
       }
     } finally {
-      setStreaming(false);
-      abortRef.current = null;
+      // 只有自己仍是当前流时才回收全局状态：切会话后立刻提问，旧流的 finally 不能把新流的
+      // 控制器清掉、也不能提前解锁输入框（否则停止按钮失效、streaming 与真实请求不一致）
+      if (abortRef.current === controller) {
+        abortRef.current = null;
+        setStreaming(false);
+      }
       void refreshMe(); // 配额变化
       void loadConvs(); // 会话标题更新
     }
-  }, [input, streaming, activeConv, loadConvs, refreshMe, mode]);
+  }, [activeConv, loadConvs, refreshMe, mode]);
 
   const stop = useCallback(() => {
     abortRef.current?.abort();
+  }, []);
+
+  /** 重试：移除失败气泡与它对应的提问，再用同一句话重发（否则同一问题会在列表里堆两遍） */
+  const retry = useCallback(
+    (assistantId: string) => {
+      if (streamingRef.current) return;
+      const list = messagesRef.current;
+      const idx = list.findIndex((m) => m.id === assistantId);
+      if (idx < 1) return;
+      for (let i = idx - 1; i >= 0; i--) {
+        if (list[i].role !== 'user') continue;
+        const question = list[i].content;
+        const next = list.filter((_, j) => j !== idx && j !== i);
+        messagesRef.current = next;
+        setMessages(next);
+        void send(question);
+        return;
+      }
+    },
+    [send],
+  );
+
+  /** 打开反馈弹窗：rating 由按钮决定，坐标用按钮自身的 rect（键盘触发时 clientX/Y 是 0） */
+  const openFeedback = useCallback((messageId: string, rating: 'up' | 'down', anchor: DOMRect) => {
+    if (messageId.startsWith('u-') || messageId.startsWith('a-')) return; // 尚未落库的流式消息
+    setFbReasons([]); // 上一轮的勾选不能带到这一次，否则会把 👍 提交成 down
+    setFbComment('');
+    setFbTarget({ messageId, rating, x: anchor.left, y: anchor.bottom + 8 });
   }, []);
 
   const submitFeedback = useCallback(async (messageId: string, rating: 'up' | 'down', reasons: string[], comment: string) => {
@@ -304,7 +364,8 @@ export default function Chat() {
                 key={m.id}
                 m={m}
                 fb={fbDone[m.id]}
-                onFeedback={(x, y) => (m.id.startsWith('a-') ? undefined : setFbTarget({ messageId: m.id, x, y }))}
+                onFeedback={openFeedback}
+                onRetry={retry}
               />
             ))}
           </div>
@@ -339,11 +400,11 @@ export default function Chat() {
               disabled={streaming}
             />
             {streaming ? (
-              <button className="chat-send" title="停止生成" onClick={stop}>
+              <button className="chat-send" title="停止生成" aria-label="停止生成" onClick={stop}>
                 <Square fill="currentColor" strokeWidth={0} />
               </button>
             ) : (
-              <button className="chat-send" title="发送" disabled={!input.trim()} onClick={() => void send()}>
+              <button className="chat-send" title="发送" aria-label="发送" disabled={!input.trim()} onClick={() => void send()}>
                 <ArrowUp />
               </button>
             )}
@@ -359,12 +420,13 @@ export default function Chat() {
       {fbTarget && (
         <FeedbackPopover
           pos={fbTarget}
+          rating={fbTarget.rating}
           reasons={fbReasons}
           onToggle={(r) => setFbReasons((prev) => (prev.includes(r) ? prev.filter((x) => x !== r) : [...prev, r]))}
           comment={fbComment}
           onComment={setFbComment}
           onClose={() => setFbTarget(null)}
-          onSubmit={(rating) => void submitFeedback(fbTarget.messageId, rating, fbReasons, fbComment)}
+          onSubmit={() => void submitFeedback(fbTarget.messageId, fbTarget.rating, fbReasons, fbComment)}
           busy={fbBusy}
         />
       )}
@@ -372,7 +434,19 @@ export default function Chat() {
   );
 }
 
-function MessageView({ m, fb, onFeedback }: { m: LiveMessage; fb?: 'up' | 'down'; onFeedback: (x: number, y: number) => void }) {
+const MessageView = memo(function MessageView({
+  m,
+  fb,
+  onFeedback,
+  onRetry,
+}: {
+  m: LiveMessage;
+  fb?: 'up' | 'down';
+  /** 父级用稳定引用（useCallback），配合 memo 避免每帧 delta 重渲全部历史消息 */
+  onFeedback: (messageId: string, rating: 'up' | 'down', anchor: DOMRect) => void;
+  onRetry: (messageId: string) => void;
+}) {
+  const retryable = m.status === 'failed' && !!m.error && RETRYABLE_ERRORS.has(m.error.code);
   if (m.role === 'user') {
     return (
       <div className="msg-user">
@@ -395,9 +469,16 @@ function MessageView({ m, fb, onFeedback }: { m: LiveMessage; fb?: 'up' | 'down'
       {failed ? (
         <div className="alert-banner alert-critical" style={{ margin: 0, maxWidth: 640 }}>
           <CircleAlert />
-          <div>
-            <b>{m.error!.code === 'NO_EVIDENCE' ? '没有找到依据' : '问答失败'}</b>
-            <div style={{ fontWeight: 400 }}>{ERROR_HINT[m.error!.code] ?? m.error!.message}</div>
+          <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10 }}>
+            <div style={{ flex: 1 }}>
+              <b>{m.error!.code === 'NO_EVIDENCE' ? '没有找到依据' : '问答失败'}</b>
+              <div style={{ fontWeight: 400 }}>{ERROR_HINT[m.error!.code] ?? m.error!.message}</div>
+            </div>
+            {retryable && (
+              <button className="btn btn-sm btn-ghost" onClick={() => onRetry(m.id)}>
+                重试
+              </button>
+            )}
           </div>
         </div>
       ) : (
@@ -415,14 +496,18 @@ function MessageView({ m, fb, onFeedback }: { m: LiveMessage; fb?: 'up' | 'down'
             <button
               className={`icon-btn${fb === 'up' ? ' on' : ''}`}
               title="有帮助"
-              onClick={(e) => onFeedback(e.clientX, e.clientY - 150)}
+              aria-label="有帮助"
+              aria-pressed={fb === 'up'}
+              onClick={(e) => onFeedback(m.id, 'up', e.currentTarget.getBoundingClientRect())}
             >
               <ThumbsUp />
             </button>
             <button
               className={`icon-btn${fb === 'down' ? ' on' : ''}`}
               title="没帮助"
-              onClick={(e) => onFeedback(e.clientX, e.clientY - 150)}
+              aria-label="没帮助"
+              aria-pressed={fb === 'down'}
+              onClick={(e) => onFeedback(m.id, 'down', e.currentTarget.getBoundingClientRect())}
             >
               <ThumbsDown />
             </button>
@@ -431,7 +516,7 @@ function MessageView({ m, fb, onFeedback }: { m: LiveMessage; fb?: 'up' | 'down'
       )}
     </div>
   );
-}
+});
 
 /** 回答渲染：轻量 Markdown 块级（标题/列表/表格/代码）+ [n] 引用上标点击定位 */
 function AnswerText({ content, citations, streaming }: { content: string; citations: CitationDto[]; streaming: boolean }) {
@@ -453,7 +538,8 @@ function AnswerText({ content, citations, streaming }: { content: string; citati
     [citations],
   );
   return (
-    <div className="msg-answer md-answer">
+    // 流式输出对读屏器可见：否则整段回答在视觉上一直在变，辅助技术却毫无反馈
+    <div className="msg-answer md-answer" aria-live={streaming ? 'polite' : undefined} aria-busy={streaming || undefined}>
       {blocks.map((b, bi) => {
         const key = `b-${bi}`;
         switch (b.kind) {
@@ -525,20 +611,37 @@ function CitationList({ citations }: { citations: CitationDto[] }) {
 
 function FeedbackPopover(props: {
   pos: { x: number; y: number };
+  /** 由点击的按钮决定：提交的 rating 必须与之一致，不能靠"是否勾了原因"推断 */
+  rating: 'up' | 'down';
   reasons: string[];
   onToggle: (r: string) => void;
   comment: string;
   onComment: (v: string) => void;
   onClose: () => void;
-  onSubmit: (rating: 'up' | 'down') => void;
+  onSubmit: () => void;
   busy?: boolean;
 }) {
-  const { pos, reasons, onToggle, comment, onComment, onClose, onSubmit, busy } = props;
-  const isDown = reasons.length > 0;
+  const { pos, rating, reasons, onToggle, comment, onComment, onClose, onSubmit, busy } = props;
+  const isDown = rating === 'down';
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key === 'Escape') onClose();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [onClose]);
+
   return (
     <>
       <div style={{ position: 'fixed', inset: 0, zIndex: 45 }} onClick={onClose} />
-      <div className="fb-pop" style={{ left: Math.max(12, pos.x - 130), top: Math.max(12, pos.y), zIndex: 50 }}>
+      <div
+        className="fb-pop"
+        role="dialog"
+        aria-modal="true"
+        aria-label={isDown ? '回答反馈（没帮助）' : '回答反馈（有帮助）'}
+        style={{ left: Math.max(12, pos.x - 130), top: Math.max(12, pos.y), zIndex: 50 }}
+      >
         <div className="fb-pop-title">{isDown ? '哪里没帮助？（可多选）' : '反馈这条回答'}</div>
         {isDown && (
           <div className="fb-reasons">
@@ -561,7 +664,7 @@ function FeedbackPopover(props: {
           <button className="btn btn-ghost btn-sm" onClick={onClose}>
             取消
           </button>
-          <button className="btn btn-primary btn-sm" disabled={busy} onClick={() => onSubmit(isDown ? 'down' : 'up')}>
+          <button className="btn btn-primary btn-sm" disabled={busy} onClick={onSubmit}>
             提交反馈
           </button>
         </div>

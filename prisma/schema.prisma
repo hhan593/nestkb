@@ -228,6 +228,8 @@ model DocumentChunk {
 
   @@unique([versionId, chunkNo])
   @@index([deptId, versionId], map: "idx_chunks_perm")
+  // 重摄取按 document_id 整批 DELETE：没有这条索引就是大表全扫，且发生在 advisory lock 事务内（#32）
+  @@index([documentId], map: "idx_chunks_document")
   // HNSW 向量索引 / GIN tsv / GIN trgm 由迁移 SQL 手工维护（见 prisma/migrations/*_init/migration.sql）
   @@map("document_chunks")
 }

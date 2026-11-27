@@ -4,4 +4,5 @@ export * from './trace/trace';
 export * from './logging/logger';
 export * from './redis/redis.service';
 export * from './http/http-commons';
+export * from './http/upload';
 export * from './common.module';

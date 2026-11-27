@@ -1,10 +1,9 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { ErrorCodes, TokenUsage } from '@lib/contracts';
+import { ErrorCodes, TokenUsage, estimateTokens, monthStartUtc8 } from '@lib/contracts';
 import { AppEnv, ENV, QuotaExceededException, RateLimitedException, REDIS } from '@app/common';
 import type Redis from 'ioredis';
 import { PRICE_TABLE, PriceTable } from '@lib/llm';
 import { PrismaService } from '@app/prisma';
-import { monthStart } from '../users/users.service';
 import type { UsageScene } from '@prisma/client';
 
 const RESERVATION_TTL_SEC = 300;
@@ -50,21 +49,25 @@ export class MeteringService {
       completion_tokens: p.usage.completion_tokens,
       cached_tokens: p.usage.prompt_tokens_details?.cached_tokens ?? 0,
     });
-    const record = await this.prisma.usageRecord.create({
-      data: {
-        userId: p.userId,
-        deptId: p.deptId,
-        scene: p.scene,
-        provider: `${p.provider}/${p.model}`,
-        promptTokens: p.usage.prompt_tokens,
-        completionTokens: p.usage.completion_tokens,
-        cachedTokens: p.usage.prompt_tokens_details?.cached_tokens ?? 0,
-        costEstimated: cost,
-        requestId: p.requestId,
-      },
-    });
-    await this.release(p.userId);
-    return { cost, usageId: record.id };
+    try {
+      const record = await this.prisma.usageRecord.create({
+        data: {
+          userId: p.userId,
+          deptId: p.deptId,
+          scene: p.scene,
+          provider: `${p.provider}/${p.model}`,
+          promptTokens: p.usage.prompt_tokens,
+          completionTokens: p.usage.completion_tokens,
+          cachedTokens: p.usage.prompt_tokens_details?.cached_tokens ?? 0,
+          costEstimated: cost,
+          requestId: p.requestId,
+        },
+      });
+      return { cost, usageId: record.id };
+    } finally {
+      // 结算即释放预扣键：落库失败也要释放，否则调用方只能靠超时（TTL 300s）解锁
+      await this.release(p.userId).catch(() => undefined);
+    }
   }
 
   /** 中断/失败部分结算：按已产生字符估算 completion（防费用漂移，计划书 8.2 失败分支） */
@@ -73,7 +76,7 @@ export class MeteringService {
   ): Promise<{ cost: number; usageId: string }> {
     const usage: TokenUsage = {
       prompt_tokens: p.promptTokensEstimate,
-      completion_tokens: Math.ceil(p.completionChars / 1.6),
+      completion_tokens: estimateTokens(p.completionChars),
     };
     return this.settle({ ...p, usage });
   }
@@ -87,7 +90,7 @@ export class MeteringService {
   async monthUsedCny(deptId: string): Promise<number> {
     const agg = await this.prisma.usageRecord.aggregate({
       _sum: { costEstimated: true },
-      where: { deptId, createdAt: { gte: monthStart() } },
+      where: { deptId, createdAt: { gte: monthStartUtc8() } },
     });
     return Number(agg._sum.costEstimated ?? 0);
   }
