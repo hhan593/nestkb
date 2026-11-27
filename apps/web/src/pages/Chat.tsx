@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ArrowUp, MessageSquarePlus, Square, ThumbsDown, ThumbsUp, FileSearch, CircleAlert, X } from 'lucide-react';
+import { ArrowUp, MessageSquarePlus, Square, ThumbsDown, ThumbsUp, FileSearch, CircleAlert, X, Menu } from 'lucide-react';
 import { api, apiStream } from '../lib/api';
 import { parseSseStream } from '../lib/sse';
 import { useAuth } from '../lib/auth';
@@ -57,6 +57,8 @@ export default function Chat() {
   const [fbDone, setFbDone] = useState<Record<string, 'up' | 'down'>>({});
   const [fbBusy, setFbBusy] = useState(false);
   const [pageError, setPageError] = useState<string | null>(null);
+  /** 移动端：会话栏是抽屉，≤900px 时默认收起（桌面端该状态无效果） */
+  const [convDrawerOpen, setConvDrawerOpen] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const messagesRef = useRef<LiveMessage[]>([]);
@@ -73,6 +75,7 @@ export default function Chat() {
   const activeConvRef = useRef<string | null>(null);
 
   const openConv = useCallback(async (id: string) => {
+    setConvDrawerOpen(false); // 移动端：选中会话后收起抽屉，把内容区让出来
     abortRef.current?.abort(); // 切换会话前终止仍在进行的流式回答，避免旧内容串台
     activeConvRef.current = id;
     setActiveConv(id);
@@ -116,6 +119,7 @@ export default function Chat() {
       abortRef.current?.abort();
       setActiveConv(null);
       setMessages([]);
+      setConvDrawerOpen(false);
     }
     void loadConvs();
   }, [activeConv, loadConvs]);
@@ -128,6 +132,7 @@ export default function Chat() {
       activeConvRef.current = conv.id;
       setActiveConv(conv.id);
       setMessages([]);
+      setConvDrawerOpen(false);
     } catch (err) {
       setPageError(err instanceof Error ? err.message : '新建会话失败');
     }
@@ -230,10 +235,16 @@ export default function Chat() {
 
   return (
     <div className="chat-wrap">
-      <aside className="conv-list">
-        <button className="btn btn-primary" style={{ justifyContent: 'center' }} onClick={() => void newConv()}>
-          <MessageSquarePlus /> 新会话
-        </button>
+      {convDrawerOpen && <div className="conv-scrim" onClick={() => setConvDrawerOpen(false)} />}
+      <aside className={`conv-list${convDrawerOpen ? ' open' : ''}`}>
+        <div className="conv-head">
+          <button className="btn btn-primary" style={{ justifyContent: 'center' }} onClick={() => void newConv()}>
+            <MessageSquarePlus /> 新会话
+          </button>
+          <button className="icon-btn conv-drawer-close" title="收起会话列表" onClick={() => setConvDrawerOpen(false)}>
+            <X />
+          </button>
+        </div>
         <div className="conv-scroll">
           {convs.length === 0 && <div style={{ fontSize: 12, color: 'var(--ink-3)', textAlign: 'center', padding: 16 }}>还没有会话</div>}
           {convs.map((c) => (
@@ -250,6 +261,16 @@ export default function Chat() {
       </aside>
 
       <div className="chat-main">
+        {/* 移动端：会话栏变成抽屉，必须有一个常驻入口，否则新建/切换会话都没有入口 */}
+        <div className="chat-mobile-bar">
+          <button className="icon-btn" title="会话列表" onClick={() => setConvDrawerOpen(true)}>
+            <Menu />
+          </button>
+          <span className="conv-title">{convs.find((c) => c.id === activeConv)?.title || '新会话'}</span>
+          <button className="btn btn-sm btn-ghost" onClick={() => void newConv()}>
+            <MessageSquarePlus /> 新会话
+          </button>
+        </div>
         {pageError && (
           <div className="alert-banner alert-critical" style={{ margin: '12px 16px 0', maxWidth: 640 }}>
             <CircleAlert />
