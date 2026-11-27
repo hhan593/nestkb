@@ -2,6 +2,10 @@ import { Inject, Injectable, OnApplicationShutdown } from '@nestjs/common';
 import { Pool, PoolClient } from 'pg';
 import { AppEnv, ENV } from '@app/common';
 import { accessWhereSql, AccessScope } from './access-filter';
+import { chunkScopeSql } from './chunk-scope';
+
+/** 对照查询只回答「有没有」，取 3 行足够；LIMIT 常量避免参数位再占一格 */
+const CONTRAST_PROBE_LIMIT = 3;
 
 /** pg 原始行（document_chunks JOIN documents JOIN document_versions） */
 export interface ChunkRow {
@@ -37,10 +41,13 @@ export interface ReplaceVersionPayload {
 export class VectorStoreService implements OnApplicationShutdown {
   private readonly pool: Pool;
   private readonly embeddingModel: string;
+  /** 对照查询的相似度下限：低于此值不算「库里有相关内容」，避免无关提问被判成无权限 */
+  private readonly contrastMinSimilarity: number;
 
   constructor(@Inject(ENV) env: AppEnv) {
     this.pool = new Pool({ connectionString: env.pgvectorUrl, max: 10 });
     this.embeddingModel = env.embedding.model;
+    this.contrastMinSimilarity = env.retrieval.contrastMinSimilarity;
   }
 
   async onApplicationShutdown(): Promise<void> {
@@ -130,14 +137,34 @@ export class VectorStoreService implements OnApplicationShutdown {
     return rows.map((r) => r.id);
   }
 
+  /**
+   * 用户视角是否存在任何可检索版本（只探一行）：空召回时用来区分「库里对你就没东西」与「这个问题没依据」。
+   * 与 currentVersionIds 判定条件一致，但不等价于全部返回后再取 length —— 版本集合可能有上千条。
+   */
+  async hasVisibleDocuments(scope: AccessScope): Promise<boolean> {
+    const w = accessWhereSql(scope, 1, 'd.department_id');
+    const params = [...w.params, new Date().toISOString()];
+    const { rowCount } = await this.pool.query(
+      `SELECT 1
+         FROM document_versions v
+         JOIN documents d ON d.id = v.document_id
+        WHERE d.status = 'active'
+          AND d.current_version_id = v.id
+          AND (v.expires_at IS NULL OR v.expires_at > $${params.length})
+          AND ${w.sql}
+        LIMIT 1`,
+      params,
+    );
+    return (rowCount ?? 0) > 0;
+  }
+
   /** 向量召回：权限 WHERE 前置，只检索当前版本，过期文档不可召回；版本范围在 SQL 内解析（免传全库 id 数组） */
   async searchVectors(vector: number[], topK: number, scope: AccessScope): Promise<ChunkRow[]> {
-    const wv = accessWhereSql(scope, 1, 'd.department_id');
-    const wc = accessWhereSql(scope, wv.params.length + 1, 'c.dept_id');
-    const params: unknown[] = [...wv.params, ...wc.params, this.embeddingModel, `[${vector.join(',')}]`, topK];
-    const modelIdx = wv.params.length + wc.params.length + 1;
+    const s = chunkScopeSql(scope, 1);
+    const modelIdx = s.params.length + 1;
     const vecIdx = modelIdx + 1;
-    const limitIdx = modelIdx + 2;
+    const limitIdx = vecIdx + 1;
+    const params: unknown[] = [...s.params, this.embeddingModel, `[${vector.join(',')}]`, topK];
     const { rows } = await this.pool.query<ChunkRow>(
       `SELECT c.id, c.document_id, c.version_id, c.chunk_no, c.content, c.heading_path,
               d.title, v.version_no, v.effective_at, v.expires_at,
@@ -145,17 +172,8 @@ export class VectorStoreService implements OnApplicationShutdown {
          FROM document_chunks c
          JOIN documents d         ON d.id = c.document_id
          JOIN document_versions v ON v.id = c.version_id
-        WHERE c.version_id IN (
-                SELECT v.id
-                  FROM document_versions v
-                  JOIN documents d ON d.id = v.document_id
-                 WHERE d.status = 'active'
-                   AND d.current_version_id = v.id
-                   AND (v.expires_at IS NULL OR v.expires_at > now())
-                   AND ${wv.sql})
-          AND (v.expires_at IS NULL OR v.expires_at > now())
+        WHERE ${s.sql}
           AND c.embedding_model = $${modelIdx}
-          AND ${wc.sql}
         ORDER BY c.embedding <=> $${vecIdx}
         LIMIT $${limitIdx}`,
       params,
@@ -168,11 +186,10 @@ export class VectorStoreService implements OnApplicationShutdown {
    * 与向量同库免同步；权限 WHERE 与向量路完全一致。
    */
   async searchFts(query: string, topK: number, scope: AccessScope): Promise<ChunkRow[]> {
-    const wv = accessWhereSql(scope, 1, 'd.department_id');
-    const wc = accessWhereSql(scope, wv.params.length + 1, 'c.dept_id');
-    const params: unknown[] = [...wv.params, ...wc.params, query, topK];
-    const queryIdx = wv.params.length + wc.params.length + 1;
+    const s = chunkScopeSql(scope, 1);
+    const queryIdx = s.params.length + 1;
     const limitIdx = queryIdx + 1;
+    const params: unknown[] = [...s.params, query, topK];
     const { rows } = await this.pool.query<ChunkRow>(
       `SELECT c.id, c.document_id, c.version_id, c.chunk_no, c.content, c.heading_path,
               d.title, v.version_no, v.effective_at, v.expires_at,
@@ -183,16 +200,7 @@ export class VectorStoreService implements OnApplicationShutdown {
          FROM document_chunks c
          JOIN documents d         ON d.id = c.document_id
          JOIN document_versions v ON v.id = c.version_id
-        WHERE c.version_id IN (
-                SELECT v.id
-                  FROM document_versions v
-                  JOIN documents d ON d.id = v.document_id
-                 WHERE d.status = 'active'
-                   AND d.current_version_id = v.id
-                   AND (v.expires_at IS NULL OR v.expires_at > now())
-                   AND ${wv.sql})
-          AND (v.expires_at IS NULL OR v.expires_at > now())
-          AND ${wc.sql}
+        WHERE ${s.sql}
           AND (c.tsv @@ websearch_to_tsquery('simple', $${queryIdx}) OR c.content % $${queryIdx})
         ORDER BY score DESC
         LIMIT $${limitIdx}`,
@@ -201,23 +209,26 @@ export class VectorStoreService implements OnApplicationShutdown {
     return rows;
   }
 
-  /** 对照查询（admin 视角）：hitCount=0 时区分"真没有"与"被权限滤光"（计划书 难点 3）；归档文档不算库内内容 */
-  async contrastExists(vector: number[], scope: AccessScope): Promise<boolean> {
+  /**
+   * 对照查询（admin 视角）：hitCount=0 时区分"真没有"与"被权限滤光"（计划书 难点 3）；归档文档不算库内内容。
+   * 与 searchVectors 共用 chunkScopeSql + 同 embedding_model + 相似度下限 —— 只有「同一把尺子」量出来的
+   * 「存在」才配说「您没有权限」，否则无关提问（如「你好」）、换模型后的旧向量都会误报无权限（#24）。
+   */
+  async contrastExists(vector: number[], scope: AccessScope, minSimilarity = this.contrastMinSimilarity): Promise<boolean> {
     const adminScope: AccessScope = { userId: scope.userId, deptId: scope.deptId, isAdmin: true };
-    const w = accessWhereSql(adminScope, 3, 'c.dept_id');
-    const params: unknown[] = [`[${vector.join(',')}]`, ...w.params];
-    const limitIdx = params.length + 1;
-    params.push(3);
+    const s = chunkScopeSql(adminScope, 2); // $1 = 查询向量
+    const modelIdx = s.params.length + 2;
+    const simIdx = modelIdx + 1;
+    const params: unknown[] = [`[${vector.join(',')}]`, ...s.params, this.embeddingModel, minSimilarity];
     const { rowCount } = await this.pool.query(
       `SELECT c.id
          FROM document_chunks c
          JOIN documents d         ON d.id = c.document_id
          JOIN document_versions v ON v.id = c.version_id
-        WHERE d.status = 'active'
-          AND (v.expires_at IS NULL OR v.expires_at > now())
-          AND ${w.sql}
-        ORDER BY c.embedding <=> $1
-        LIMIT $${limitIdx}`,
+        WHERE ${s.sql}
+          AND c.embedding_model = $${modelIdx}
+          AND 1 - (c.embedding <=> $1) >= $${simIdx}
+        LIMIT ${CONTRAST_PROBE_LIMIT}`,
       params,
     );
     return (rowCount ?? 0) > 0;

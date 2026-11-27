@@ -147,6 +147,11 @@ export class HybridRetrievalService {
     return result;
   }
 
+  /** 用户视角是否有任何可检索文档（无可见文档 ≠ 无相关依据，#24 的文案分流依据） */
+  async hasVisibleDocuments(scope: AccessScope): Promise<boolean> {
+    return this.store.hasVisibleDocuments(scope);
+  }
+
   /** 权限滤光判定：admin 对照查询有结果而用户视角为空 → 提示"无权限"而非"没有依据" */
   async contrastExists(query: string, scope: AccessScope): Promise<boolean> {
     const queryVec = await this.embedding.embedQuery(query);

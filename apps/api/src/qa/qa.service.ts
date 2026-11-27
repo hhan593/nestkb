@@ -10,6 +10,7 @@ import {
 } from '@lib/contracts';
 import {
   NO_EVIDENCE_ANSWER,
+  NO_VISIBLE_DOCS_ANSWER,
   PERMISSION_FILTERED_ANSWER,
   buildChatPrompt,
   buildRagPrompt,
@@ -265,12 +266,20 @@ export class QaService {
         requestId,
       });
 
-      // ── 召回为空：区分"真没有"与"被权限滤光"（计划书 难点 3），不调 LLM，零生成成本
+      // ── 召回为空：三态分流（计划书 难点 3），不调 LLM，零生成成本
+      //    ① 库里没有你可访问的文档 → 说明可见范围，不暗示"问题没依据"
+      //    ② 有可见文档且库中存在相似内容（同模型、当前版本、达相似度下限）→ 才是"无权限"
+      //    ③ 其余（如「你好」这类无关提问）→ 无依据
       if (chunks.length === 0) {
-        const existsSomewhere = await this.retrieval.contrastExists(question, scope);
-        const answer = existsSomewhere ? PERMISSION_FILTERED_ANSWER : NO_EVIDENCE_ANSWER;
+        const hasVisible = await this.retrieval.hasVisibleDocuments(scope);
+        const permissionFiltered = hasVisible && (await this.retrieval.contrastExists(question, scope));
+        const answer = permissionFiltered
+          ? PERMISSION_FILTERED_ANSWER
+          : hasVisible
+            ? NO_EVIDENCE_ANSWER
+            : NO_VISIBLE_DOCS_ANSWER;
         await this.persistPair(conv.id, question, answer, [], messageId, result, Date.now() - t0, 'completed');
-        if (existsSomewhere) {
+        if (permissionFiltered || !hasVisible) {
           sink.delta(answer);
           sink.citations([]);
           sink.usage(EMPTY_USAGE);
@@ -426,7 +435,8 @@ export class QaService {
     return visible >= docIds.length;
   }
 
-  private async persistPair(    conversationId: string,
+  private async persistPair(
+    conversationId: string,
     question: string,
     answer: string,
     citations: CitationDto[],
