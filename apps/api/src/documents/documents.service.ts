@@ -56,7 +56,7 @@ export class DocumentsService {
   }> {
     const doc = await this.prisma.document.findUnique({ where: { id: documentId } });
     if (!doc) throw new NotFoundException('文档不存在');
-    this.assertCanManage(user, doc.departmentId);
+    await this.assertCanManage(user, doc);
     return this.createVersionFor(user, documentId, {
       ...input,
       title: doc.title,
@@ -273,7 +273,7 @@ export class DocumentsService {
   async remove(user: AuthedUser, id: string): Promise<void> {
     const doc = await this.prisma.document.findUnique({ where: { id } });
     if (!doc) throw new NotFoundException('文档不存在');
-    this.assertCanManage(user, doc.departmentId);
+    await this.assertCanManage(user, doc);
     const versions = await this.prisma.documentVersion.findMany({ where: { documentId: id } });
     // 先断开自引用（current_version_id → document_versions），否则级联删除时 FK 校验失败
     await this.prisma.document.update({ where: { id }, data: { currentVersionId: null } });
@@ -351,9 +351,28 @@ export class DocumentsService {
     return { requeued: true };
   }
 
-  private assertCanManage(user: AuthedUser, deptId: string): void {
-    if (user.role !== 'admin' && user.deptId !== deptId) {
+  /**
+   * 管理权 = 归属权 ∩ 可见权（admin 直通，#26）。
+   *
+   * 这两条判据原先各管一段：`remove` 只查归属、`list/detail` 走 visibilityOf，于是
+   * 「列表里根本看不到的 whitelist 文档」仍能被同部门成员删掉或覆盖新版本。管理不该比查看更宽。
+   */
+  private async assertCanManage(
+    user: AuthedUser,
+    doc: { id: string; departmentId: string; accessLevel: AccessLevel },
+  ): Promise<void> {
+    if (user.role === 'admin') return; // admin 直通：治理操作不受白名单过滤影响
+    if (user.deptId !== doc.departmentId) {
       throw new ForbiddenException({ code: ErrorCodes.FORBIDDEN, message: '只能管理本部门文档' });
+    }
+    if (doc.accessLevel !== 'whitelist') return; // company/department 对本部门天然可见
+    // 白名单 default deny：归属部门同样要显式授权才看得见，看不见就不该能删
+    const visible = await this.prisma.document.count({ where: { id: doc.id, ...visibilityOf(user) } });
+    if (!visible) {
+      throw new ForbiddenException({
+        code: ErrorCodes.FORBIDDEN,
+        message: '该白名单文档未授权给您，无法管理；请联系文档归属部门或管理员',
+      });
     }
   }
 
