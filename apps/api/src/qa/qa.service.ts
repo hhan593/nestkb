@@ -183,6 +183,39 @@ export class QaService {
       return;
     }
 
+    // 预扣成功后必须保证有出口释放：任何未走到结算的路径（检索/落库/摘要化抛错）都由这里的 finally 兜底。
+    // 否则 Redis 预留键要等 TTL(300s) 才过期，期间该用户所有提问都会 429「上一笔问答尚未结算」。
+    const reservation = { active: true };
+    try {
+      await this.runAnswer(opts, { conv, mode, messageId, zeroMeta, topK, estPromptTokens, t0, reservation });
+    } finally {
+      if (reservation.active) await this.metering.release(user.userId).catch(() => undefined);
+    }
+  }
+
+  /** 问答主体（预扣之后）：所有退出路径要么结算（自身释放），要么由 ask() 的 finally 释放 */
+  private async runAnswer(
+    opts: AskOptions,
+    ctx: {
+      conv: { id: string; title: string | null; summary: string | null };
+      mode: QaMode;
+      messageId: string;
+      zeroMeta: RetrievalMetaDto;
+      topK: number;
+      estPromptTokens: number;
+      t0: number;
+      reservation: { active: boolean };
+    },
+  ): Promise<void> {
+    const { user, question, sink, requestId } = opts;
+    const { conv, mode, messageId, zeroMeta, topK, estPromptTokens, t0, reservation } = ctx;
+    /** 提前退出时释放预扣键（幂等：已释放则跳过） */
+    const releaseReservation = async (): Promise<void> => {
+      if (!reservation.active) return;
+      reservation.active = false;
+      await this.metering.release(user.userId).catch(() => undefined);
+    };
+
     const scope: AccessScope = { userId: user.userId, deptId: user.deptId, isAdmin: user.role === 'admin' };
     // 两种模式的差异只收在这几个变量上：chat 恒为空召回、无引用、无 rerank 降级
     let chunks: RetrievedChunk[] = [];
@@ -200,7 +233,7 @@ export class QaService {
         this.logger.error('retrieval failed', { err: String(err) });
         sink.open({ messageId, requestId, retrieval: zeroMeta });
         sink.error({ code: ErrorCodes.UPSTREAM_ERROR, message: '检索服务异常，请稍后重试', retryable: true });
-        await this.metering.release(user.userId);
+        await releaseReservation();
         return;
       }
       chunks = result.chunks;
@@ -245,7 +278,7 @@ export class QaService {
         } else {
           sink.error({ code: ErrorCodes.NO_EVIDENCE, message: '知识库中没有找到依据', retrieval: { hitCount: 0 } });
         }
-        await this.metering.release(user.userId);
+        await releaseReservation();
         return;
       }
     } else {
@@ -318,6 +351,7 @@ export class QaService {
         mode === 'rag'
           ? validateCitations(streamResult.content, chunks, (w) => this.logger.warn(w))
           : { answer: streamResult.content, citations: [] as CitationDto[] };
+      reservation.active = false; // settle 内部（含落库失败）必定释放预扣键，避免 finally 误删下一次请求的预留键
       const settle = await this.metering.settle({
         userId: user.userId,
         deptId: user.deptId,
@@ -363,7 +397,8 @@ export class QaService {
           latencyMs: Date.now() - t0,
         },
       });
-      // 按已产生 token 部分结算（防漂移）
+      // 按已产生 token 部分结算（防漂移）；settlePartial 内部同样保证释放预扣键
+      reservation.active = false;
       await this.metering
         .settlePartial({
           userId: user.userId,
