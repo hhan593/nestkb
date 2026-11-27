@@ -10,7 +10,7 @@ import { Inject } from '@nestjs/common';
 import { REDIS } from '@app/common';
 import type Redis from 'ioredis';
 import { invalidateDeptCache } from '../qa/semantic-cache.service';
-import { IsDateString, IsInt, IsOptional, IsString, Min } from 'class-validator';
+import { IsDateString, IsIn, IsInt, IsOptional, IsString, IsUUID, Min } from 'class-validator';
 
 class UsageQueryDto {
   @IsOptional()
@@ -33,6 +33,19 @@ class QuotaDto {
   @IsInt()
   @Min(0)
   quotaMonth!: number;
+}
+
+class GrantDto {
+  @IsIn(['dept', 'user'])
+  subjectType!: 'dept' | 'user';
+
+  @IsUUID()
+  subjectId!: string;
+
+  /** ISO 时间；不传表示长期有效 */
+  @IsOptional()
+  @IsDateString()
+  expiresAt?: string;
 }
 
 class ImportCasesDto {
@@ -160,7 +173,7 @@ export class AdminController {
   async grant(
     @CurrentUser() user: AuthedUser,
     @Param('id') id: string,
-    @Body() dto: { subjectType: 'dept' | 'user'; subjectId: string; expiresAt?: string },
+    @Body() dto: GrantDto,
   ) {
     const doc = await this.prisma.document.findUnique({ where: { id } });
     if (!doc) throw new BadRequestException('文档不存在');

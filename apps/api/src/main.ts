@@ -8,11 +8,11 @@ import cors from '@fastify/cors';
 import fastifyStatic from '@fastify/static';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
-import { ENV } from '@app/common';
+import { ENV, maxUploadBytes } from '@app/common';
 import { AppModule } from './app.module';
 
 // ≤20MB（计划书 P0-2）；小内存部署可用 MAX_UPLOAD_MB 降档（2G 机器建议 10）
-const MAX_UPLOAD_BYTES = Number(process.env.MAX_UPLOAD_MB || 20) * 1024 * 1024;
+const MAX_UPLOAD_BYTES = maxUploadBytes();
 const WEB_DIST = path.join(process.cwd(), 'apps', 'web', 'dist');
 
 async function bootstrap(): Promise<void> {

@@ -1,10 +1,9 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { ErrorCodes, TokenUsage } from '@lib/contracts';
+import { ErrorCodes, TokenUsage, estimateTokens, monthStartUtc8 } from '@lib/contracts';
 import { AppEnv, ENV, QuotaExceededException, RateLimitedException, REDIS } from '@app/common';
 import type Redis from 'ioredis';
 import { PRICE_TABLE, PriceTable } from '@lib/llm';
 import { PrismaService } from '@app/prisma';
-import { monthStart } from '../users/users.service';
 import type { UsageScene } from '@prisma/client';
 
 const RESERVATION_TTL_SEC = 300;
@@ -77,7 +76,7 @@ export class MeteringService {
   ): Promise<{ cost: number; usageId: string }> {
     const usage: TokenUsage = {
       prompt_tokens: p.promptTokensEstimate,
-      completion_tokens: Math.ceil(p.completionChars / 1.6),
+      completion_tokens: estimateTokens(p.completionChars),
     };
     return this.settle({ ...p, usage });
   }
@@ -91,7 +90,7 @@ export class MeteringService {
   async monthUsedCny(deptId: string): Promise<number> {
     const agg = await this.prisma.usageRecord.aggregate({
       _sum: { costEstimated: true },
-      where: { deptId, createdAt: { gte: monthStart() } },
+      where: { deptId, createdAt: { gte: monthStartUtc8() } },
     });
     return Number(agg._sum.costEstimated ?? 0);
   }

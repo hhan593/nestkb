@@ -4,15 +4,13 @@ import { Queue } from 'bullmq';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
-import { ErrorCodes, INGEST_QUEUE, IngestJobData } from '@lib/contracts';
+import { ALLOWED_EXT, ErrorCodes, INGEST_QUEUE, IngestJobData, extForMime } from '@lib/contracts';
 import { AccessLevel, type Prisma } from '@prisma/client';
-import { AppEnv, ENV, REDIS, TraceService } from '@app/common';
+import { AppEnv, ENV, REDIS, TraceService, maxUploadBytes, maxUploadMb } from '@app/common';
 import type Redis from 'ioredis';
 import { PrismaService } from '@app/prisma';
 import { invalidateDeptCache } from '../qa/semantic-cache.service';
 import type { AuthedUser } from '../auth/auth.service';
-
-const ALLOWED_EXT = new Set(['.md', '.markdown', '.txt', '.pdf', '.docx']);
 
 type PrismaDocumentVersion = Awaited<ReturnType<Prisma.TransactionClient['documentVersion']['create']>>;
 
@@ -75,12 +73,12 @@ export class DocumentsService {
     ingestionJobId: string;
     acceptedAt: string;
   }> {
-    const ext = path.extname(input.filename).toLowerCase() || this.extFromMime(input.mimetype);
+    const ext = path.extname(input.filename).toLowerCase() || extForMime(input.mimetype);
     if (!ALLOWED_EXT.has(ext)) {
       throw new BadRequestException({ code: ErrorCodes.UNSUPPORTED_TYPE, message: `不支持的文件类型：${ext}` });
     }
-    if (input.buffer.byteLength > 20 * 1024 * 1024) {
-      throw new BadRequestException({ code: ErrorCodes.FILE_TOO_LARGE, message: '文件超过 20MB 上限' });
+    if (input.buffer.byteLength > maxUploadBytes()) {
+      throw new BadRequestException({ code: ErrorCodes.FILE_TOO_LARGE, message: `文件超过 ${maxUploadMb()}MB 上限` });
     }
     const checksum = createHash('sha256').update(input.buffer).digest('hex');
 
@@ -386,15 +384,6 @@ export class DocumentsService {
     return [...new Set([deptId, ...grants.map((g) => g.subjectId)])];
   }
 
-  private extFromMime(mime: string): string {
-    const map: Record<string, string> = {
-      'text/markdown': '.md',
-      'text/plain': '.md',
-      'application/pdf': '.pdf',
-      'application/vnd.openxmlformats-officedocument.wordprocessingml.document': '.docx',
-    };
-    return map[mime] ?? '';
-  }
 }
 
 /** 可见性 OR 条件：company / 本部门 department / whitelist 显式授权（含用户级），default deny。
