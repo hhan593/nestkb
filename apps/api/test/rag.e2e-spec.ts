@@ -72,6 +72,17 @@ describe('RAG 全链路 E2E', () => {
     await worker.close().catch(() => undefined);
   }, 60_000);
 
+  it('链路⓪：不存在的会话返回 404 JSON（SSE 路由不抢写响应， #27）', async () => {
+    const res = await request(base)
+      .post('/qa/conversations/00000000-0000-0000-0000-000000000001/messages')
+      .set('Authorization', `Bearer ${alice}`)
+      .send({ question: '你好' });
+
+    expect(res.status).toBe(404);
+    expect((res.body as { code: string }).code).toBe('NOT_FOUND');
+    expect(String(res.text).length).toBeGreaterThan(0); // 不能是空 body
+  }, 30_000);
+
   it('链路①：上传 → 摄取 ready → 问答带引用（T10 顺带覆盖引用展开字段）', async () => {
     // 1. 管理员（研发部）上传 department 级文档
     const doc = await uploadDoc(base, admin, { title: `技术规范-E2E-${Date.now()}`, accessLevel: 'department', content: CORPUS_A });
