@@ -62,6 +62,19 @@ async function bootstrap(): Promise<void> {
   console.log(
     `${new Date().toISOString()} LOG [api] listening on http://0.0.0.0:${env.port}${hasWeb ? '（含前端 SPA）' : '（仅 API）'}`,
   );
+
+  // 启动即亮明实际 provider：线上曾整段跑桩模型却毫无信号（#25），这行日志是最后一道肉眼防线
+  const providers = [
+    `chat=${env.chat.provider}/${env.chat.model}`,
+    `embedding=${env.embedding.provider}/${env.embedding.model}`,
+    `rerank=${env.rerank.provider}/${env.rerank.model}`,
+  ];
+  console.log(`${new Date().toISOString()} LOG [api] providers: ${providers.join(' ')}`);
+  if (env.chat.provider === 'mock' || env.embedding.provider === 'mock' || env.rerank.provider === 'mock') {
+    console.warn(
+      `${new Date().toISOString()} WARN [api] mock provider 生效：回答为模板拼接、成本恒为 0，不代表真实模型效果`,
+    );
+  }
 }
 
 void bootstrap();

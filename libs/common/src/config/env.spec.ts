@@ -42,6 +42,16 @@ describe('env 校验（zod，启动即失败）', () => {
     expect(env.priceTable['m'].input).toBe(2);
   });
 
+  it('生产环境默认禁止 mock provider（桩模型不能当生产配置）', () => {
+    expect(() => parseEnv({ ...base, NODE_ENV: 'production' })).toThrow(/仍为 mock/);
+  });
+
+  it('生产环境显式放行后可继续用 mock（离线演示/纯前端联调）', () => {
+    const env = parseEnv({ ...base, NODE_ENV: 'production', LLM_ALLOW_MOCK_IN_PROD: 'true' });
+    expect(env.allowMockInProd).toBe(true);
+    expect(env.chat.provider).toBe('mock');
+  });
+
   it('语义缓存开关解析布尔语义', () => {
     expect(parseEnv({ ...base, SEMANTIC_CACHE_ENABLED: 'true' }).semanticCacheEnabled).toBe(true);
     expect(parseEnv(base).semanticCacheEnabled).toBe(false);

@@ -32,7 +32,7 @@ export class WebUiController {
   async serve(@Req() req: FastifyRequest, @Res() res: FastifyReply): Promise<void> {
     const url = (req.url || '').split('?')[0];
     // API 路径空间永不返回 SPA（即便路径未命中 API 路由，也保持 JSON 404 语义）
-    const isApi = /^\/(auth|documents|qa|messages|admin)(\/|$)/.test(url);
+    const isApi = /^\/(auth|documents|qa|messages|admin|health)(\/|$)/.test(url);
     const isPage = req.headers.accept?.toString().includes('text/html') ?? false;
     if (!this.hasWeb || isApi || !isPage) {
       void res.code(404).type('application/json').send({ code: 'NOT_FOUND', message: `路由不存在: ${req.method} ${req.url}` });
