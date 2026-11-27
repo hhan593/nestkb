@@ -17,7 +17,12 @@ describe('env 校验（zod，启动即失败）', () => {
     const env = parseEnv(base);
     expect(env.chat.provider).toBe('mock');
     expect(env.embedding.dim).toBe(1024);
-    expect(env.retrieval).toEqual({ topKCoarse: 50, topKFinal: 8, rrfK: 60 });
+    expect(env.retrieval).toEqual({ topKCoarse: 50, topKFinal: 8, rrfK: 60, contrastMinSimilarity: 0.35 });
+  });
+
+  it('对照查询相似度下限可配置，越界即启动失败', () => {
+    expect(parseEnv({ ...base, RETRIEVAL_CONTRAST_MIN_SIMILARITY: '0.5' }).retrieval.contrastMinSimilarity).toBe(0.5);
+    expect(() => parseEnv({ ...base, RETRIEVAL_CONTRAST_MIN_SIMILARITY: '1.5' })).toThrow();
   });
 
   it('非 mock provider 缺 baseUrl/apiKey/model 时启动失败', () => {

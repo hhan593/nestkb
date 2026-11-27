@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import { NO_VISIBLE_DOCS_ANSWER, PERMISSION_FILTERED_ANSWER } from '@lib/prompts';
 import type { AuthedUser } from '../auth/auth.service';
 import { QaService, QaStreamSink } from './qa.service';
 
@@ -45,13 +46,18 @@ function makeService(overrides: { queryLogWrite?: () => Promise<void> } = {}) {
     model: 'mock-chat',
   };
   const env = {
-    retrieval: { topKFinal: 8, topKCoarse: 50, rrfK: 60 },
+    retrieval: { topKFinal: 8, topKCoarse: 50, rrfK: 60, contrastMinSimilarity: 0.35 },
     qa: { rateLimitPerMin: 20, maxHistoryTurns: 8, keepRecent: 4 },
     semanticCacheEnabled: false,
   };
+  const retrieval = {
+    retrieve: vi.fn(),
+    contrastExists: vi.fn(async () => false),
+    hasVisibleDocuments: vi.fn(async () => true),
+  };
   const service = new QaService(
     prisma as never,
-    { retrieve: vi.fn(), contrastExists: vi.fn(async () => false) } as never,
+    retrieval as never,
     llm as never,
     metering as never,
     queryLog as never,
@@ -59,7 +65,7 @@ function makeService(overrides: { queryLogWrite?: () => Promise<void> } = {}) {
     env as never,
     { warn: vi.fn(), error: vi.fn(), log: vi.fn() } as never,
   );
-  return { service, prisma, metering, queryLog, llm };
+  return { service, prisma, metering, queryLog, llm, retrieval };
 }
 
 const askOpts = (sink: QaStreamSink) => ({
@@ -113,5 +119,63 @@ describe('QaService.ask —— 预扣键生命周期（#23）', () => {
 
     expect(metering.settlePartial).toHaveBeenCalledTimes(1);
     expect(metering.release).not.toHaveBeenCalled();
+  });
+});
+
+const emptyRetrieval = () => ({
+  chunks: [],
+  degraded: false,
+  hitCount: 0,
+  latencyMs: 5,
+  debug: {
+    versionIdCount: 0,
+    vectorTop: [],
+    ftsTop: [],
+    fusedTop: [],
+    rerankedTop: [],
+    breakdown: { embedMs: 1, vectorMs: 1, ftsMs: 1, fuseMs: 0, rerankMs: 0 },
+  },
+});
+
+const ragOpts = (sink: QaStreamSink) => ({ ...askOpts(sink), mode: 'rag' as const });
+
+describe('QaService.ask —— 空召回三态文案（#24）', () => {
+  it('用户没有任何可见文档 → 说明可见范围，不暗示"没有依据"', async () => {
+    const sink = makeSink();
+    const { service, retrieval } = makeService();
+    retrieval.retrieve.mockResolvedValueOnce(emptyRetrieval());
+    retrieval.hasVisibleDocuments.mockResolvedValueOnce(false);
+
+    await service.ask(ragOpts(sink));
+
+    expect(retrieval.contrastExists).not.toHaveBeenCalled();
+    expect(sink.delta).toHaveBeenCalledWith(NO_VISIBLE_DOCS_ANSWER);
+    expect(sink.error).not.toHaveBeenCalled();
+  });
+
+  it('有可见文档但库里没有相近内容 → 无依据（而非无权限）', async () => {
+    const sink = makeSink();
+    const { service, retrieval } = makeService();
+    retrieval.retrieve.mockResolvedValueOnce(emptyRetrieval());
+    retrieval.hasVisibleDocuments.mockResolvedValueOnce(true);
+    retrieval.contrastExists.mockResolvedValueOnce(false);
+
+    await service.ask(ragOpts(sink));
+
+    expect(sink.delta).not.toHaveBeenCalled();
+    expect(sink.error).toHaveBeenCalledWith(expect.objectContaining({ code: 'NO_EVIDENCE' }));
+  });
+
+  it('对照查询命中（同模型、当前版本、达相似度下限）才提示无权限', async () => {
+    const sink = makeSink();
+    const { service, retrieval } = makeService();
+    retrieval.retrieve.mockResolvedValueOnce(emptyRetrieval());
+    retrieval.hasVisibleDocuments.mockResolvedValueOnce(true);
+    retrieval.contrastExists.mockResolvedValueOnce(true);
+
+    await service.ask(ragOpts(sink));
+
+    expect(sink.delta).toHaveBeenCalledWith(PERMISSION_FILTERED_ANSWER);
+    expect(sink.error).not.toHaveBeenCalled();
   });
 });

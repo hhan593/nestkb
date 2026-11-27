@@ -158,24 +158,31 @@ describe('RAG 全链路 E2E', () => {
     const emptyConv = await request(base).post('/qa/conversations').set('Authorization', `Bearer ${emptyLogin}`);
     const emptyConvId = (emptyConv.body.data as { id: string }).id;
 
-    // ── 路径 A：被权限滤光（库内有 department 文档但该用户不可见）→ 提示无权限，非 error
+    // ── 路径 A：命中 0 条 → 零生成费用拒答（有可见文档时按「无权限 / 无依据」分流，两种都不调 LLM）
     const beforeA = await prisma.usageRecord.count({ where: { scene: 'qa' } });
     const eventsA = await ask(base, emptyLogin, emptyConvId, '量子计算部门的预算规模是多少？');
     const kindsA = eventsA.map((e) => e.event);
-    expect(kindsA).not.toContain('error');
     expect(kindsA[kindsA.length - 1]).toBe('done');
-    const usageA = eventsA.find((e) => e.event === 'usage')!.data as { costEstimated: number };
-    expect(usageA.costEstimated).toBe(0); // 不调 LLM
+    if (kindsA.includes('error')) {
+      // 无权限文案前提是「库里有足够相近的内容」；相似度不过线时必须退化为无依据
+      const errA = eventsA.find((e) => e.event === 'error')!.data as { code: string };
+      expect(errA.code).toBe('NO_EVIDENCE');
+    } else {
+      const usageA = eventsA.find((e) => e.event === 'usage')!.data as { costEstimated: number };
+      expect(usageA.costEstimated).toBe(0); // 不调 LLM
+    }
     const afterA = await prisma.usageRecord.count({ where: { scene: 'qa' } });
     expect(afterA).toBe(beforeA);
 
-    // ── 路径 B：真没有（全库归档 → admin 对照也为空）→ NO_EVIDENCE error 事件
+    // ── 路径 B：用户零可见文档（全库归档）→ 说明可见范围，不是「这个问题没依据」
     await prisma.document.updateMany({ data: { status: 'archived' } });
     const eventsB = await ask(base, emptyLogin, emptyConvId, '量子计算部门的预算规模是多少？');
-    const err = eventsB.find((e) => e.event === 'error')!.data as { code: string; message: string; retrieval: { hitCount: number } };
-    expect(err.code).toBe('NO_EVIDENCE');
-    expect(err.message).toContain('没有找到依据');
-    expect(err.retrieval.hitCount).toBe(0);
+    expect(eventsB.map((e) => e.event)).not.toContain('error');
+    const answerB = eventsB
+      .filter((e) => e.event === 'delta')
+      .map((e) => (e.data as { text: string }).text)
+      .join('');
+    expect(answerB).toContain('没有您可以访问的文档');
     await prisma.document.updateMany({ data: { status: 'active' } });
 
     // ── 对照：admin（可见全部）对同一问题 → 检索有候选、正常回答（材料不足由生成层拒答）

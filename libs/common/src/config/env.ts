@@ -72,6 +72,8 @@ export const envSchema = z
     RETRIEVAL_TOPK_COARSE: z.coerce.number().int().positive().default(50),
     RETRIEVAL_TOPK_FINAL: z.coerce.number().int().positive().default(8),
     RRF_K: z.coerce.number().int().positive().default(60),
+    // 对照查询（"库里有相关内容但你没权限"）的余弦相似度下限；低于此值一律算"没有依据"
+    RETRIEVAL_CONTRAST_MIN_SIMILARITY: z.coerce.number().min(0).max(1).default(0.35),
 
     DEPT_MONTHLY_QUOTA_CNY: z.coerce.number().nonnegative().default(50),
     QA_REQUEST_LIMIT_PER_MIN: z.coerce.number().int().positive().default(5),
@@ -150,7 +152,7 @@ export interface AppEnv {
   rerank: ProviderConfig & { timeoutMs: number };
   /** 模型名 → 价格表（元/百万 token 或 元/次）；成本看板与预算闸唯一依据 */
   priceTable: Record<string, PriceEntry>;
-  retrieval: { topKCoarse: number; topKFinal: number; rrfK: number };
+  retrieval: { topKCoarse: number; topKFinal: number; rrfK: number; contrastMinSimilarity: number };
   quota: { monthlyCny: number };
   qa: { rateLimitPerMin: number; maxHistoryTurns: number; keepRecent: number };
   semanticCacheEnabled: boolean;
@@ -234,7 +236,12 @@ export function parseEnv(raw: NodeJS.ProcessEnv): AppEnv {
       timeoutMs: c.RERANK_TIMEOUT_MS,
     },
     priceTable,
-    retrieval: { topKCoarse: c.RETRIEVAL_TOPK_COARSE, topKFinal: c.RETRIEVAL_TOPK_FINAL, rrfK: c.RRF_K },
+    retrieval: {
+      topKCoarse: c.RETRIEVAL_TOPK_COARSE,
+      topKFinal: c.RETRIEVAL_TOPK_FINAL,
+      rrfK: c.RRF_K,
+      contrastMinSimilarity: c.RETRIEVAL_CONTRAST_MIN_SIMILARITY,
+    },
     quota: { monthlyCny: c.DEPT_MONTHLY_QUOTA_CNY },
     qa: { rateLimitPerMin: c.QA_REQUEST_LIMIT_PER_MIN, maxHistoryTurns: c.HISTORY_MAX_TURNS, keepRecent: c.HISTORY_KEEP_RECENT },
     semanticCacheEnabled: c.SEMANTIC_CACHE_ENABLED,
