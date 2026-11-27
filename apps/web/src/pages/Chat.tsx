@@ -40,7 +40,11 @@ const ERROR_HINT: Record<string, string> = {
   INJECTION_BLOCKED: '该问题包含不允许的指令内容。',
   UPSTREAM_ERROR: '模型服务暂时不可用，可稍后重试。',
   HTTP_ERROR: '请求失败，请确认服务已启动。',
+  STREAM_INTERRUPTED: '连接中断，回答可能不完整。可点重试重新生成。',
 };
+
+/** 这些错误重试有意义（配额/注入拦截之类重试也是同样结果，不给入口） */
+const RETRYABLE_ERRORS = new Set(['STREAM_INTERRUPTED', 'UPSTREAM_ERROR', 'HTTP_ERROR', 'RATE_LIMITED']);
 
 export default function Chat() {
   const { me, refreshMe } = useAuth();
@@ -63,7 +67,12 @@ export default function Chat() {
   messagesRef.current = messages;
 
   const loadConvs = useCallback(async () => {
-    setConvs(await api<Conversation[]>('/qa/conversations'));
+    // 三处 void loadConvs() 都会吞掉 rejection：401/500 时会话列表静默为空，用户只看到"还没有会话"
+    try {
+      setConvs(await api<Conversation[]>('/qa/conversations'));
+    } catch (err) {
+      setPageError(err instanceof Error ? err.message : '加载会话列表失败');
+    }
   }, []);
 
   useEffect(() => {
@@ -133,8 +142,9 @@ export default function Chat() {
     }
   }, [loadConvs]);
 
-  const send = useCallback(async () => {
-    const question = input.trim();
+  /** override 供「重试」用：直接重放指定问题，而不是读输入框 */
+  const send = useCallback(async (override?: string) => {
+    const question = (override ?? input).trim();
     if (!question || streaming) return;
     let convId = activeConv;
     try {
@@ -151,7 +161,7 @@ export default function Chat() {
       return;
     }
     setPageError(null);
-    setInput('');
+    if (override === undefined) setInput('');
     setStreaming(true);
     const userMsg: LiveMessage = { id: `u-${Date.now()}`, role: 'user', content: question, createdAt: new Date().toISOString() };
     const draftId = `a-${Date.now()}`;
@@ -174,6 +184,8 @@ export default function Chat() {
       setMessages(next);
     };
 
+    /** 是否收到过 done/error：没有终结事件就结束的流必须由前端兜底置为失败，否则气泡永远转圈（#29） */
+    let terminated = false;
     try {
       const res = await apiStream(`/qa/conversations/${convId}/messages`, { question, mode }, controller.signal);
       for await (const ev of parseSseStream(res, controller.signal)) {
@@ -188,10 +200,19 @@ export default function Chat() {
         } else if (ev.event === 'usage') {
           patch((m) => ({ ...m, usage: ev.data }));
         } else if (ev.event === 'done') {
+          terminated = true;
           patch((m) => ({ ...m, status: 'completed', latencyMs: ev.data.latencyMs }));
         } else if (ev.event === 'error') {
+          terminated = true;
           patch((m) => ({ ...m, status: 'failed', error: { code: ev.data.code, message: ev.data.message } }));
         }
+      }
+      if (!terminated && !controller.signal.aborted) {
+        patch((m) =>
+          m.status === 'streaming'
+            ? { ...m, status: 'failed', error: { code: 'STREAM_INTERRUPTED', message: '连接中断，回答可能不完整' } }
+            : m,
+        );
       }
     } catch (err) {
       if (!controller.signal.aborted) {
@@ -200,8 +221,12 @@ export default function Chat() {
         patch((m) => ({ ...m, status: 'aborted' }));
       }
     } finally {
-      setStreaming(false);
-      abortRef.current = null;
+      // 只有自己仍是当前流时才回收全局状态：切会话后立刻提问，旧流的 finally 不能把新流的
+      // 控制器清掉、也不能提前解锁输入框（否则停止按钮失效、streaming 与真实请求不一致）
+      if (abortRef.current === controller) {
+        abortRef.current = null;
+        setStreaming(false);
+      }
       void refreshMe(); // 配额变化
       void loadConvs(); // 会话标题更新
     }
@@ -210,6 +235,26 @@ export default function Chat() {
   const stop = useCallback(() => {
     abortRef.current?.abort();
   }, []);
+
+  /** 重试：移除失败气泡与它对应的提问，再用同一句话重发（否则同一问题会在列表里堆两遍） */
+  const retry = useCallback(
+    (assistantId: string) => {
+      if (streaming) return;
+      const list = messagesRef.current;
+      const idx = list.findIndex((m) => m.id === assistantId);
+      if (idx < 1) return;
+      for (let i = idx - 1; i >= 0; i--) {
+        if (list[i].role !== 'user') continue;
+        const question = list[i].content;
+        const next = list.filter((_, j) => j !== idx && j !== i);
+        messagesRef.current = next;
+        setMessages(next);
+        void send(question);
+        return;
+      }
+    },
+    [streaming, send],
+  );
 
   const submitFeedback = useCallback(async (messageId: string, rating: 'up' | 'down', reasons: string[], comment: string) => {
     if (fbBusy) return;
@@ -281,6 +326,7 @@ export default function Chat() {
                 m={m}
                 fb={fbDone[m.id]}
                 onFeedback={(x, y) => (m.id.startsWith('a-') ? undefined : setFbTarget({ messageId: m.id, x, y }))}
+                onRetry={m.status === 'failed' && m.error && RETRYABLE_ERRORS.has(m.error.code) ? () => retry(m.id) : undefined}
               />
             ))}
           </div>
@@ -348,7 +394,18 @@ export default function Chat() {
   );
 }
 
-function MessageView({ m, fb, onFeedback }: { m: LiveMessage; fb?: 'up' | 'down'; onFeedback: (x: number, y: number) => void }) {
+function MessageView({
+  m,
+  fb,
+  onFeedback,
+  onRetry,
+}: {
+  m: LiveMessage;
+  fb?: 'up' | 'down';
+  onFeedback: (x: number, y: number) => void;
+  /** 仅对可重试错误下发；有它才渲染「重试」入口 */
+  onRetry?: () => void;
+}) {
   if (m.role === 'user') {
     return (
       <div className="msg-user">
@@ -371,9 +428,16 @@ function MessageView({ m, fb, onFeedback }: { m: LiveMessage; fb?: 'up' | 'down'
       {failed ? (
         <div className="alert-banner alert-critical" style={{ margin: 0, maxWidth: 640 }}>
           <CircleAlert />
-          <div>
-            <b>{m.error!.code === 'NO_EVIDENCE' ? '没有找到依据' : '问答失败'}</b>
-            <div style={{ fontWeight: 400 }}>{ERROR_HINT[m.error!.code] ?? m.error!.message}</div>
+          <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10 }}>
+            <div style={{ flex: 1 }}>
+              <b>{m.error!.code === 'NO_EVIDENCE' ? '没有找到依据' : '问答失败'}</b>
+              <div style={{ fontWeight: 400 }}>{ERROR_HINT[m.error!.code] ?? m.error!.message}</div>
+            </div>
+            {onRetry && (
+              <button className="btn btn-sm btn-ghost" onClick={onRetry}>
+                重试
+              </button>
+            )}
           </div>
         </div>
       ) : (

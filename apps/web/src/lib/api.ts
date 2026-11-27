@@ -100,8 +100,13 @@ export async function api<T = unknown>(
   throw new ApiError(res.status, String(body.code ?? 'INTERNAL_ERROR'), body.message ?? `请求失败（${res.status}）`);
 }
 
-/** 问答专用：流式 POST，返回原始 Response 供 SSE 解析（401 不在此重试，见 sse.ts） */
-export async function apiStream(path: string, body: unknown, signal?: AbortSignal): Promise<Response> {
+/**
+ * 问答专用：流式 POST，返回原始 Response 供 SSE 解析。
+ *
+ * accessToken 只有 2h：不为流式请求做刷新重放的话，token 一过期提问就永久失败（页面看着还登录着）。
+ * 刷新逻辑与 api() 共用同一个 refreshing 单例，避免并发刷新把 refreshToken 轮换两次。
+ */
+export async function apiStream(path: string, body: unknown, signal?: AbortSignal, retry = true): Promise<Response> {
   const tokens = loadTokens();
   const res = await fetch(path, {
     method: 'POST',
@@ -113,5 +118,18 @@ export async function apiStream(path: string, body: unknown, signal?: AbortSigna
     body: JSON.stringify(body),
     signal,
   });
+
+  if (res.status === 401 && retry && tokens) {
+    refreshing ??= refreshTokens().finally(() => {
+      refreshing = null;
+    });
+    const next = await refreshing;
+    if (next) return apiStream(path, body, signal, false);
+    // 其他标签页可能已轮换过 refreshToken：本地 token 变了就用新 token 重放，别误杀登录态
+    const now = loadTokens();
+    if (now && now.refreshToken !== tokens.refreshToken) return apiStream(path, body, signal, false);
+    saveTokens(null);
+    window.dispatchEvent(new CustomEvent(UNAUTHORIZED_EVENT));
+  }
   return res;
 }
