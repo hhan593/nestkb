@@ -109,6 +109,9 @@ export default function Chat() {
   }, [messages]);
 
   const removeConv = useCallback(async (id: string) => {
+    // 破坏性操作先确认：与删除文档（Documents 页）保持一致，误触不该丢掉整段对话
+    const title = convs.find((c) => c.id === id)?.title || '新会话';
+    if (!window.confirm(`删除会话「${title}」？删除后无法恢复。`)) return;
     try {
       await api(`/qa/conversations/${id}`, { method: 'DELETE' });
     } catch (err) {
@@ -122,7 +125,7 @@ export default function Chat() {
       setConvDrawerOpen(false);
     }
     void loadConvs();
-  }, [activeConv, loadConvs]);
+  }, [activeConv, convs, loadConvs]);
 
   const newConv = useCallback(async () => {
     try {
