@@ -6,10 +6,9 @@ import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { ALLOWED_EXT, ErrorCodes, INGEST_QUEUE, IngestJobData, extForMime } from '@lib/contracts';
 import { AccessLevel, type Prisma } from '@prisma/client';
-import { AppEnv, ENV, REDIS, TraceService, maxUploadBytes, maxUploadMb } from '@app/common';
+import { AppEnv, ENV, REDIS, TraceService, invalidateDeptCache, maxUploadBytes, maxUploadMb } from '@app/common';
 import type Redis from 'ioredis';
 import { PrismaService } from '@app/prisma';
-import { invalidateDeptCache } from '../qa/semantic-cache.service';
 import type { AuthedUser } from '../auth/auth.service';
 
 type PrismaDocumentVersion = Awaited<ReturnType<Prisma.TransactionClient['documentVersion']['create']>>;

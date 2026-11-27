@@ -68,7 +68,7 @@ scripts/           seed / seed-docs / doctor / deploy / loadtest
 | `pnpm migrate` / `pnpm deploy:migrate` | 开发迁移 / 生产迁移 |
 | `pnpm seed` / `pnpm seed:docs` | 初始化账号与评测集 / 灌入示例语料 |
 | `pnpm doctor` | 环境与模型连通性自检 |
-| `pnpm test` / `pnpm test:watch` | 单元测试（106 个用例） |
+| `pnpm test` / `pnpm test:watch` | 单元测试（110 个用例） |
 | `pnpm test:e2e` | E2E（真实 PG + Redis + mock LLM，19 个用例） |
 | `pnpm eval` | 评估回归，结果写入 `eval_runs` |
 

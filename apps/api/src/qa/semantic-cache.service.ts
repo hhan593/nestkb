@@ -1,7 +1,6 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { createHash } from 'node:crypto';
 import { CitationDto } from '@lib/contracts';
-import { REDIS } from '@app/common';
+import { REDIS, invalidateDeptCache, semanticCacheKey } from '@app/common';
 import type Redis from 'ioredis';
 
 const CACHE_TTL_SEC = 24 * 3600;
@@ -23,7 +22,7 @@ export class SemanticCacheService {
   ) {}
 
   private key(deptId: string, question: string): string {
-    return `scache:${deptId}:${createHash('sha1').update(normalize(question)).digest('hex')}`;
+    return semanticCacheKey(deptId, question);
   }
 
   async get(deptId: string, question: string): Promise<CacheEntry | null> {
@@ -44,17 +43,4 @@ export class SemanticCacheService {
   async invalidateDept(deptId: string): Promise<void> {
     await invalidateDeptCache(this.redis, deptId);
   }
-}
-
-export async function invalidateDeptCache(redis: Redis, deptId: string): Promise<void> {
-  let cursor = '0';
-  do {
-    const [next, keys] = await redis.scan(cursor, 'MATCH', `scache:${deptId}:*`, 'COUNT', 200);
-    cursor = next;
-    if (keys.length) await redis.unlink(...keys);
-  } while (cursor !== '0');
-}
-
-function normalize(q: string): string {
-  return q.trim().replace(/\s+/g, ' ').toLowerCase();
 }

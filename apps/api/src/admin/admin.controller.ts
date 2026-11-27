@@ -7,9 +7,8 @@ import { AdminService } from './admin.service';
 import { QueryLogService } from '../query-logs/query-log.service';
 import { PrismaService } from '@app/prisma';
 import { Inject } from '@nestjs/common';
-import { REDIS } from '@app/common';
+import { REDIS, invalidateDeptCache } from '@app/common';
 import type Redis from 'ioredis';
-import { invalidateDeptCache } from '../qa/semantic-cache.service';
 import { IsDateString, IsIn, IsInt, IsOptional, IsString, IsUUID, Min } from 'class-validator';
 
 class UsageQueryDto {
