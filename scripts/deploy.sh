@@ -34,27 +34,43 @@ git pull --ff-only
 
 # ── 3. 生成 .env.prod（已存在则跳过，保留既有密钥）──
 if [ ! -f .env.prod ]; then
+  # 生产环境默认禁桩（应用层 fail-fast）：只有三通路都指向真实 provider 才不写放行开关。
+  # 首次部署没给 key 时显式写 LLM_ALLOW_MOCK_IN_PROD=true —— 让"演示模式"是明示选择，而不是默默降级。
+  CHAT_PROVIDER="${LLM_CHAT_PROVIDER:-mock}"
+  EMBEDDING_PROVIDER="${LLM_EMBEDDING_PROVIDER:-mock}"
+  RERANK_PROVIDER="${LLM_RERANK_PROVIDER:-mock}"
+  ALLOW_MOCK=false
+  if [ "$CHAT_PROVIDER" = mock ] || [ "$EMBEDDING_PROVIDER" = mock ] || [ "$RERANK_PROVIDER" = mock ]; then
+    ALLOW_MOCK=true
+  fi
+
   log "生成 .env.prod（JWT_SECRET / POSTGRES_PASSWORD 自动随机；模型 key 可留空先用 mock，之后编辑补上）"
   cat > .env.prod <<ENV
 JWT_SECRET=$(openssl rand -hex 32)
 POSTGRES_PASSWORD=$(openssl rand -hex 16)
-LLM_CHAT_PROVIDER=${LLM_CHAT_PROVIDER:-mock}
+LLM_CHAT_PROVIDER=${CHAT_PROVIDER}
 LLM_CHAT_BASE_URL=${LLM_CHAT_BASE_URL:-}
 LLM_CHAT_API_KEY=${LLM_CHAT_API_KEY:-}
 LLM_CHAT_MODEL=${LLM_CHAT_MODEL:-mock-chat}
 LLM_CHAT_TEMPERATURE=0.2
-LLM_EMBEDDING_PROVIDER=${LLM_EMBEDDING_PROVIDER:-mock}
+LLM_EMBEDDING_PROVIDER=${EMBEDDING_PROVIDER}
 LLM_EMBEDDING_BASE_URL=${LLM_EMBEDDING_BASE_URL:-}
 LLM_EMBEDDING_API_KEY=${LLM_EMBEDDING_API_KEY:-}
 LLM_EMBEDDING_MODEL=${LLM_EMBEDDING_MODEL:-mock-embedding}
-LLM_RERANK_PROVIDER=${LLM_RERANK_PROVIDER:-mock}
+LLM_RERANK_PROVIDER=${RERANK_PROVIDER}
 LLM_RERANK_BASE_URL=${LLM_RERANK_BASE_URL:-}
 LLM_RERANK_API_KEY=${LLM_RERANK_API_KEY:-}
 LLM_RERANK_MODEL=${LLM_RERANK_MODEL:-mock-reranker}
+LLM_ALLOW_MOCK_IN_PROD=${ALLOW_MOCK}
 PRICE_JSON=${PRICE_JSON:-{}}
 ENV
   chmod 600 .env.prod
-  log ".env.prod 已生成 —— 接真实模型：编辑本文件补 LLM_* 三通路 key 与 PRICE_JSON，然后重新执行本脚本"
+  if [ "$ALLOW_MOCK" = true ]; then
+    log "注意：当前为桩模型演示模式（LLM_ALLOW_MOCK_IN_PROD=true）——回答是模板拼接，不代表真实模型效果。"
+    log "接真实模型：编辑 .env.prod 补齐 LLM_* 三通路 key / model / PRICE_JSON，并把 LLM_ALLOW_MOCK_IN_PROD 改为 false，然后重新执行本脚本"
+  else
+    log ".env.prod 已生成 —— 接真实模型：编辑本文件补 LLM_* 三通路 key 与 PRICE_JSON，然后重新执行本脚本"
+  fi
 fi
 
 # ── 4. GHCR 登录（包默认私有，需要 PAT with read:packages）──

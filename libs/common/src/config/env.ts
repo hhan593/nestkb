@@ -61,6 +61,13 @@ export const envSchema = z
     LLM_RERANK_MODEL: z.string().default('mock-reranker'),
     RERANK_TIMEOUT_MS: z.coerce.number().int().positive().default(800),
 
+    // 生产环境出现 mock provider 一律按配置错误处理（#25）：桩模型会把"能跑"伪装成"能用"。
+    // 离线演示/纯前端联调需显式放行，不提供隐式默认。
+    LLM_ALLOW_MOCK_IN_PROD: z
+      .string()
+      .default('false')
+      .transform((v) => ['1', 'true', 'yes'].includes(v.toLowerCase())),
+
     PRICE_JSON: z.string().default(
       JSON.stringify({
         'mock-chat': { input: 2, output: 8 },
@@ -109,6 +116,28 @@ export const envSchema = z
     check('LLM_CHAT', cfg.LLM_CHAT_PROVIDER, cfg.LLM_CHAT_BASE_URL, cfg.LLM_CHAT_API_KEY, cfg.LLM_CHAT_MODEL);
     check('LLM_EMBEDDING', cfg.LLM_EMBEDDING_PROVIDER, cfg.LLM_EMBEDDING_BASE_URL, cfg.LLM_EMBEDDING_API_KEY, cfg.LLM_EMBEDDING_MODEL);
     check('LLM_RERANK', cfg.LLM_RERANK_PROVIDER, cfg.LLM_RERANK_BASE_URL, cfg.LLM_RERANK_API_KEY, cfg.LLM_RERANK_MODEL);
+
+    // 生产禁桩：mock 的 chat 永远回模板、mock 的 rerank 只按字面覆盖率打分，且不产生任何告警
+    if (cfg.NODE_ENV === 'production' && !cfg.LLM_ALLOW_MOCK_IN_PROD) {
+      const mocked = (
+        [
+          ['LLM_CHAT_PROVIDER', cfg.LLM_CHAT_PROVIDER],
+          ['LLM_EMBEDDING_PROVIDER', cfg.LLM_EMBEDDING_PROVIDER],
+          ['LLM_RERANK_PROVIDER', cfg.LLM_RERANK_PROVIDER],
+        ] as Array<[string, string]>
+      )
+        .filter(([, p]) => p === 'mock')
+        .map(([k]) => k);
+      if (mocked.length) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message:
+            `NODE_ENV=production 但 ${mocked.join(' / ')} 仍为 mock：桩模型只会返回模板答案，` +
+            `看起来"能跑"却不具备生产能力。请在 .env 显式配置真实 provider；` +
+            `离线演示确需桩模型时显式设置 LLM_ALLOW_MOCK_IN_PROD=true`,
+        });
+      }
+    }
   });
 
 export interface ProviderConfig {
@@ -129,6 +158,8 @@ export interface PriceEntry {
 export interface AppEnv {
   nodeEnv: 'development' | 'test' | 'production';
   port: number;
+  /** 生产环境显式放行 mock provider（默认 false：production+mock 启动即失败） */
+  allowMockInProd: boolean;
   jwtSecret: string;
   jwtAccessTtl: string;
   jwtRefreshTtl: string;
@@ -197,6 +228,7 @@ export function parseEnv(raw: NodeJS.ProcessEnv): AppEnv {
   return {
     nodeEnv: c.NODE_ENV,
     port: c.PORT,
+    allowMockInProd: c.LLM_ALLOW_MOCK_IN_PROD,
     jwtSecret: c.JWT_SECRET,
     jwtAccessTtl: c.JWT_ACCESS_TTL,
     jwtRefreshTtl: c.JWT_REFRESH_TTL,
