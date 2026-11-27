@@ -1,5 +1,6 @@
 import { CanActivate, ExecutionContext, ForbiddenException, Injectable, SetMetadata } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
+import { ErrorCodes } from '@lib/contracts';
 import type { FastifyRequest } from 'fastify';
 import type { AuthedUser } from '../auth.service';
 
@@ -19,7 +20,7 @@ export class RolesGuard implements CanActivate {
     if (!roles?.length) return true;
     const req = context.switchToHttp().getRequest<FastifyRequest & { user?: AuthedUser }>();
     if (!req.user || !roles.includes(req.user.role)) {
-      throw new ForbiddenException({ code: 'FORBIDDEN', message: '需要管理员权限' });
+      throw new ForbiddenException({ code: ErrorCodes.FORBIDDEN, message: '需要管理员权限' });
     }
     return true;
   }

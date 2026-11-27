@@ -6,14 +6,24 @@ import { RerankService } from '@lib/llm';
 import { AccessScope } from './access-filter';
 import { ChunkRow, VectorStoreService } from './vector-store.service';
 
+/** 分段耗时：P95 超标先看哪段贡献最大。常规问答也需要（不含明细，零额外查询） */
+export interface RetrievalTiming {
+  /** 索引签名：该对象直接落 query_logs 的 JSON 列，需满足 Prisma.InputJsonObject */
+  [key: string]: number;
+  embedMs: number;
+  vectorMs: number;
+  ftsMs: number;
+  fuseMs: number;
+  rerankMs: number;
+}
+
 export interface RetrievalDebugInfo {
   versionIdCount: number;
   vectorTop: Array<{ chunkId: string; score: number }>;
   ftsTop: Array<{ chunkId: string; score: number }>;
   fusedTop: Array<{ chunkId: string; score: number }>;
   rerankedTop: Array<{ chunkId: string; score: number }>;
-  /** latency_breakdown：{embedMs, vectorMs, ftsMs, rerankMs} —— P95 超标先看哪段贡献最大 */
-  breakdown: { embedMs: number; vectorMs: number; ftsMs: number; fuseMs: number; rerankMs: number };
+  breakdown: RetrievalTiming;
 }
 
 export interface RetrievalResult {
@@ -21,6 +31,9 @@ export interface RetrievalResult {
   degraded: boolean;
   hitCount: number;
   latencyMs: number;
+  /** 始终返回：问答写 query_logs 靠它定位慢在哪一段，不需要 top10 明细 */
+  breakdown: RetrievalTiming;
+  /** 仅 debug:true 时返回（明细会写 4 份 top10 JSON，常规问答不承担这个成本） */
   debug?: RetrievalDebugInfo;
 }
 
@@ -80,20 +93,28 @@ export class HybridRetrievalService {
     const coarseK = this.env.retrieval.topKCoarse; // 粗排池取大：rerank 的前提是"先别漏"
     const topKFinal = opts.topKFinal ?? this.env.retrieval.topKFinal;
     const t0 = performance.now();
-    const [queryVec, versionIds] = await Promise.all([
+    const [queryVec, versionIdCount] = await Promise.all([
       this.embedding.embedQuery(query),
-      // 仅调试视图需要 version 集合规模；常规召回的版本/权限范围已在检索 SQL 内解析
-      opts.debug ? this.store.currentVersionIds(scope) : Promise.resolve([]),
+      // 仅调试视图需要版本集合规模：用 count(*) 而不是把上千个 id 拉回来只为了取 length
+      opts.debug ? this.store.countVisibleDocuments(scope) : Promise.resolve(0),
     ]);
     const embedMs = performance.now() - t0;
 
     const t1 = performance.now();
+    let vectorMs = 0;
+    let ftsMs = 0;
     const [vectorHits, ftsHits] = await Promise.all([
-      this.store.searchVectors(queryVec, coarseK, scope),
-      this.store.searchFts(query, coarseK, scope),
+      // 两路并行，但各自从同一个起点记自己的完成时间：原来 ftsMs = vectorMs 是把并行墙钟抄了一遍，
+      // 慢的那一路永远不会体现在分段时间里（#32）
+      this.store.searchVectors(queryVec, coarseK, scope).then((rows) => {
+        vectorMs = performance.now() - t1;
+        return rows;
+      }),
+      this.store.searchFts(query, coarseK, scope).then((rows) => {
+        ftsMs = performance.now() - t1;
+        return rows;
+      }),
     ]);
-    const vectorMs = performance.now() - t1;
-    const ftsMs = vectorMs; // 双路并行，共享同一段墙钟
 
     const t2 = performance.now();
     const coarse = rrfFuse(vectorHits, ftsHits, this.env.retrieval.rrfK).slice(0, coarseK);
@@ -122,29 +143,36 @@ export class HybridRetrievalService {
     }
     const rerankMs = performance.now() - t3;
 
+    const breakdown: RetrievalTiming = {
+      embedMs: Math.round(embedMs),
+      vectorMs: Math.round(vectorMs),
+      ftsMs: Math.round(ftsMs),
+      fuseMs: Math.round(fuseMs),
+      rerankMs: Math.round(rerankMs),
+    };
     const result: RetrievalResult = {
       chunks,
       degraded,
       hitCount: coarse.length,
       latencyMs: Math.round(performance.now() - t0),
+      breakdown,
     };
     if (opts.debug) {
       result.debug = {
-        versionIdCount: versionIds.length,
+        versionIdCount,
         vectorTop: vectorHits.slice(0, 10).map((r) => ({ chunkId: r.id, score: Number(Number(r.score).toFixed(6)) })),
         ftsTop: ftsHits.slice(0, 10).map((r) => ({ chunkId: r.id, score: Number(Number(r.score).toFixed(6)) })),
         fusedTop: coarse.slice(0, 10).map((c) => ({ chunkId: c.chunkId, score: Number(c.score.toFixed(6)) })),
         rerankedTop: chunks.map((c) => ({ chunkId: c.chunkId, score: Number(c.score.toFixed(6)) })),
-        breakdown: {
-          embedMs: Math.round(embedMs),
-          vectorMs: Math.round(vectorMs),
-          ftsMs: Math.round(ftsMs),
-          fuseMs: Math.round(fuseMs),
-          rerankMs: Math.round(rerankMs),
-        },
+        breakdown,
       };
     }
     return result;
+  }
+
+  /** 用户视角是否有任何可检索文档（无可见文档 ≠ 无相关依据，#24 的文案分流依据） */
+  async hasVisibleDocuments(scope: AccessScope): Promise<boolean> {
+    return this.store.hasVisibleDocuments(scope);
   }
 
   /** 权限滤光判定：admin 对照查询有结果而用户视角为空 → 提示"无权限"而非"没有依据" */

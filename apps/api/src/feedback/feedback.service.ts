@@ -37,8 +37,14 @@ export class FeedbackService {
     let queuedForEval = false;
     if (input.rating === 'down') {
       // 点踩 case 回流评测集候选池（source=feedback）：question 取该回答对应的提问；按问题去重防污染评测集
+      //
+      // 这里必须用 lte 而不是 lt：user / assistant 两条消息是相邻两次 insert（qa.service 里连续 create），
+      // created_at 在库里是微秒精度（Timestamptz(6)），读回 JS Date 却只有毫秒。
+      // 两条消息落在同一毫秒时，assistant 的毫秒截断值 ≤ user 的真实时间，`lt` 会把本轮提问整个排除掉，
+      // 表现为点踩后 queuedForEval=false —— 是否踩中毫秒边界全凭运气（CI 上两次偶发失败即此原因）。
+      // 用 lte 只会多包含同一毫秒内的 user 消息；下一轮提问要经过完整问答，不可能落在同一毫秒。
       const userMsg = await this.prisma.message.findFirst({
-        where: { conversationId: message.conversationId, role: 'user', createdAt: { lt: message.createdAt } },
+        where: { conversationId: message.conversationId, role: 'user', createdAt: { lte: message.createdAt } },
         orderBy: { createdAt: 'desc' },
       });
       if (userMsg) {

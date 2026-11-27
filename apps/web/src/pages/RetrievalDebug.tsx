@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { CircleAlert, Search } from 'lucide-react';
 import { api } from '../lib/api';
-import { fmtCost, type DebugChunk, type DebugResult } from '../lib/types';
+import { type DebugChunk, type DebugResult } from '../lib/types';
 
 function ChunkRow({ c, score, scoreLabel, hot }: { c: DebugChunk; score: number; scoreLabel?: string; hot?: boolean }) {
   void scoreLabel;
@@ -158,7 +158,7 @@ export default function RetrievalDebug() {
             {result.chunks[0]?.debug && (
               <p style={{ fontSize: 12, color: 'var(--ink-3)', marginTop: 10 }}>
                 示例分数链路（第 1 名）：<span className="mono">
-                  vector={fmtCost(result.chunks[0].debug!.vectorScore ?? null)} · fts={fmtCost(result.chunks[0].debug!.ftsScore ?? null)} · rrf={result.chunks[0].debug!.rrfScore?.toFixed(4)} → rerank={result.chunks[0].debug!.rerankScore?.toFixed(4)}
+                  vector={(result.chunks[0].debug!.vectorScore ?? 0).toFixed(4)} · fts={(result.chunks[0].debug!.ftsScore ?? 0).toFixed(4)} · rrf={result.chunks[0].debug!.rrfScore?.toFixed(4)} → rerank={result.chunks[0].debug!.rerankScore?.toFixed(4)}
                 </span>
               </p>
             )}

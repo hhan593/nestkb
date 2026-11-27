@@ -1,3 +1,4 @@
+import { estimateTokens } from '@lib/contracts';
 import type { ChatMessage, ChatStreamResult, TokenUsage } from '@lib/contracts';
 import type { ProviderConfig } from '@app/common';
 import type { LlmChatProvider, LlmEmbeddingProvider, RerankProvider } from '../provider-types';
@@ -9,10 +10,8 @@ export class LlmUpstreamError extends Error {
   }
 }
 
-/** 统一估算口径：中文 ~1.6 字符/token（护栏用途，计费以 API usage 为准） */
-export function estimateTokens(chars: number): number {
-  return Math.ceil(chars / 1.6);
-}
+// 保留这个再导出：历史调用方从 '@lib/llm' 取 estimateTokens，口径已收敛到 @lib/contracts
+export { estimateTokens };
 
 function headers(apiKey?: string): Record<string, string> {
   return { 'Content-Type': 'application/json', ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}) };

@@ -94,6 +94,7 @@ eval/           评测集版本化 + run-eval（Recall@5 / 忠实度 / 引用准
 ## API 一览（18 个 P0 接口）
 
 ```
+GET  /health（公开：provider / 迁移 / 镜像版本，DB 不可达返回 503）
 POST /auth/login | /auth/refresh        GET /auth/me
 POST /documents（multipart ≤20MB）      GET /documents | /documents/:id | /documents/:id/ingestion
 DELETE /documents/:id                   POST /documents/:id/versions | /documents/:id/reingest(admin)
@@ -130,6 +131,8 @@ SSE 事件顺序固定：`meta → delta* → citations → usage → done`（er
   docker compose -f docker/docker-compose.prod.yml exec api npx ts-node -r tsconfig-paths/register --transpile-only scripts/doctor.ts
   ```
   生产必改：`JWT_SECRET`、`PRICE_JSON`、三个 `LLM_*` 通路的 key（建议用 env 文件而非写死在 compose 里）。
+- **生产禁桩（fail-fast）**：`NODE_ENV=production` 下任一 `LLM_*_PROVIDER=mock` 会直接启动失败并打印哪几路没配——桩模型回答是模板拼接、成本恒为 0，看起来"能跑"却不代表真实效果。离线演示确需桩模型时显式设置 `LLM_ALLOW_MOCK_IN_PROD=true`（`deploy.sh` 在未提供 key 时会自动写入，并在日志里大字提示）。
+- **上线自检**：`curl http://<host>:3000/health` 返回实际生效的 `providers.{chat,embedding,rerank}`、最近一次迁移与镜像版本；`status=degraded` + HTTP 503 表示数据库不可达。容器 healthcheck 也指向该端点，桩模型在用时 `mockInUse=true`。
 
 ## 测试与评估
 

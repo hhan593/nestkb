@@ -1,5 +1,6 @@
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
+import { extForMime } from '@lib/contracts';
 import { ParseError } from './parse.error';
 import { parseDocx } from './docx';
 
@@ -40,17 +41,10 @@ export async function parsePdf(buffer: Buffer): Promise<ParsedDocument> {
   }
 }
 
-const EXT_BY_MIME: Record<string, string> = {
-  'text/markdown': '.md',
-  'text/plain': '.md',
-  'application/pdf': '.pdf',
-  'application/vnd.openxmlformats-officedocument.wordprocessingml.document': '.docx',
-};
-
 export function extOf(storageKey: string, mimeType: string): string {
   const fromKey = path.extname(storageKey).toLowerCase();
   if (fromKey) return fromKey;
-  return EXT_BY_MIME[mimeType] ?? '';
+  return extForMime(mimeType);
 }
 
 /** 按 mime/扩展名分发解析（计划书 8.4 步骤 1）；失败必须分类为 ParseError */

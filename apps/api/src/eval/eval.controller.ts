@@ -1,12 +1,21 @@
 import { BadRequestException, Body, Controller, Get, Param, Post, Query } from '@nestjs/common';
+import { IsOptional, IsString, MaxLength } from 'class-validator';
 import { Roles } from '../auth/guards/roles.guard';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import type { AuthedUser } from '../auth/auth.service';
 import { EvalService } from './eval.service';
 import { PrismaService } from '@app/prisma';
 
+/** 无装饰器的 DTO 会被全局 ValidationPipe（whitelist:true）整体剥空：字段必须声明校验规则（#33） */
 class RunEvalDto {
+  @IsOptional()
+  @IsString()
+  @MaxLength(64)
   datasetVersion?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(64)
   triggeredBy?: string;
 }
 

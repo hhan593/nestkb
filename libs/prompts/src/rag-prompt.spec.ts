@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildRagPrompt, compressHistory, NO_EVIDENCE_ANSWER } from './rag-prompt';
+import { buildChatPrompt, buildRagPrompt, compressHistory, NO_EVIDENCE_ANSWER } from './rag-prompt';
 import type { RetrievedChunk } from '@lib/contracts';
 
 const chunks: RetrievedChunk[] = [
@@ -48,5 +48,41 @@ describe('buildRagPrompt（上下文工程，计划书 8.7）', () => {
 
   it('无依据答案文案可直接下发', () => {
     expect(NO_EVIDENCE_ANSWER).toContain('无法回答');
+  });
+});
+
+describe('本轮问题只进 prompt 一次（#28）', () => {
+  const echo = [{ role: 'user' as const, content: 'X' }];
+
+  it('history 末条已是本轮问题时不重复拼接', () => {
+    const msgs = buildRagPrompt('X', chunks, echo);
+    const users = msgs.filter((m) => m.role === 'user');
+    expect(users).toHaveLength(1);
+    expect(users[0].content).toContain('【参考资料】');
+    expect(users[0].content).toContain('【问题】X');
+  });
+
+  it('出现连续两条 user 消息即视为回归（模型侧不合规结构）', () => {
+    const msgs = buildRagPrompt('X', chunks, echo);
+    for (let i = 1; i < msgs.length; i++) {
+      expect(`${msgs[i - 1].role}->${msgs[i].role}`).not.toBe('user->user');
+    }
+  });
+
+  it('真正的前序轮次仍保留（只去掉末尾回声）', () => {
+    const history = [
+      { role: 'user' as const, content: '上一问' },
+      { role: 'assistant' as const, content: '上一答' },
+      { role: 'user' as const, content: 'X' },
+    ];
+    const msgs = buildRagPrompt('X', chunks, history);
+    expect(msgs.filter((m) => m.role === 'user')).toHaveLength(2);
+    expect(msgs.map((m) => m.content).join('\n')).toContain('上一答');
+  });
+
+  it('纯对话模式同样不重复', () => {
+    const msgs = buildChatPrompt('X', echo);
+    expect(msgs.filter((m) => m.role === 'user')).toHaveLength(1);
+    expect(msgs[msgs.length - 1].content).toBe('X');
   });
 });
