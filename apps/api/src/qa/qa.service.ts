@@ -7,6 +7,7 @@ import {
   RetrievalMetaDto,
   RetrievedChunk,
   UsageDto,
+  estimateTokens,
 } from '@lib/contracts';
 import {
   NO_EVIDENCE_ANSWER,
@@ -169,10 +170,7 @@ export class QaService {
 
     // ── 预扣：两种模式都要过成本闸；chat 无资料块，预估只含问题 + 历史 + 预留输出
     const topK = opts.topK ?? this.env.retrieval.topKFinal;
-    const estPromptTokens =
-      mode === 'chat'
-        ? Math.ceil((question.length + 1500) / 1.6)
-        : Math.ceil((question.length + topK * 500) / 1.6);
+    const estPromptTokens = estimateTokens(question.length + (mode === 'chat' ? 1500 : topK * 500));
     try {
       await this.metering.preDeduct(user.userId, user.deptId, estPromptTokens);
     } catch (err) {

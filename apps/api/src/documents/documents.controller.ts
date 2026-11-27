@@ -14,19 +14,12 @@ import {
 } from '@nestjs/common';
 import type { FastifyRequest } from 'fastify';
 import { AccessLevel } from '@prisma/client';
-import { ErrorCodes } from '@lib/contracts';
+import { ErrorCodes, isAllowedMime } from '@lib/contracts';
+import { maxUploadMb } from '@app/common';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import { Roles } from '../auth/guards/roles.guard';
 import type { AuthedUser } from '../auth/auth.service';
 import { DocumentsService } from './documents.service';
-
-const ALLOWED_MIME = new Set([
-  'text/markdown',
-  'text/plain',
-  'application/pdf',
-  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-  'application/octet-stream', // 部分客户端对 .md 上报 octet-stream，按扩展名兜底
-]);
 
 @Controller('documents')
 export class DocumentsController {
@@ -52,12 +45,12 @@ export class DocumentsController {
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       if (/file.?too.?large|limit/i.test(msg)) {
-        throw new BadRequestException({ code: ErrorCodes.FILE_TOO_LARGE, message: '文件超过 20MB 上限' });
+        throw new BadRequestException({ code: ErrorCodes.FILE_TOO_LARGE, message: `文件超过 ${maxUploadMb()}MB 上限` });
       }
       throw new BadRequestException({ code: ErrorCodes.VALIDATION_FAILED, message: msg });
     }
     if (!file) throw new BadRequestException({ code: ErrorCodes.VALIDATION_FAILED, message: '缺少 file 字段' });
-    if (!ALLOWED_MIME.has(file.mimetype)) {
+    if (!isAllowedMime(file.mimetype)) {
       throw new BadRequestException({ code: ErrorCodes.UNSUPPORTED_TYPE, message: `不支持的文件类型：${file.mimetype}` });
     }
     const title = fields.title?.trim() || file.filename.replace(/\.[^.]+$/, '');
@@ -97,12 +90,12 @@ export class DocumentsController {
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       if (/file.?too.?large|limit/i.test(msg)) {
-        throw new BadRequestException({ code: ErrorCodes.FILE_TOO_LARGE, message: '文件超过 20MB 上限' });
+        throw new BadRequestException({ code: ErrorCodes.FILE_TOO_LARGE, message: `文件超过 ${maxUploadMb()}MB 上限` });
       }
       throw new BadRequestException({ code: ErrorCodes.VALIDATION_FAILED, message: msg });
     }
     if (!file) throw new BadRequestException({ code: ErrorCodes.VALIDATION_FAILED, message: '缺少 file 字段' });
-    if (!ALLOWED_MIME.has(file.mimetype)) {
+    if (!isAllowedMime(file.mimetype)) {
       throw new BadRequestException({ code: ErrorCodes.UNSUPPORTED_TYPE, message: `不支持的文件类型：${file.mimetype}` });
     }
     const expiresAt = fields.expiresAt ? new Date(fields.expiresAt) : null;

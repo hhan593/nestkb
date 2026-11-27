@@ -132,6 +132,10 @@ export const ErrorCodes = {
   RATE_LIMITED: 'RATE_LIMITED',
   NO_EVIDENCE: 'NO_EVIDENCE',
   PERMISSION_FILTERED: 'PERMISSION_FILTERED',
+  /** 提示词注入拦截：原先是 qa.service 里的裸字符串，前端无法按码分支（#33） */
+  INJECTION_BLOCKED: 'INJECTION_BLOCKED',
+  /** 流式回答中途断开（前端兜底态，后端不下发） */
+  STREAM_INTERRUPTED: 'STREAM_INTERRUPTED',
   UPSTREAM_ERROR: 'UPSTREAM_ERROR',
   PARSE_FAILED: 'PARSE_FAILED',
   FILE_TOO_LARGE: 'FILE_TOO_LARGE',
@@ -144,3 +148,9 @@ export const ErrorCodes = {
 } as const;
 
 export type ErrorCode = (typeof ErrorCodes)[keyof typeof ErrorCodes];
+
+// ============ 跨端共享的纯函数口径（零外部依赖，api / worker / web 均可引） ============
+
+export { CHARS_PER_TOKEN, estimateTokens } from './text';
+export { ALLOWED_EXT, MIME_EXT, OCTET_STREAM, extForMime, isAllowedMime } from './mime';
+export { monthStartUtc8 } from './time';
