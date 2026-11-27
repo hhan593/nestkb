@@ -50,21 +50,25 @@ export class MeteringService {
       completion_tokens: p.usage.completion_tokens,
       cached_tokens: p.usage.prompt_tokens_details?.cached_tokens ?? 0,
     });
-    const record = await this.prisma.usageRecord.create({
-      data: {
-        userId: p.userId,
-        deptId: p.deptId,
-        scene: p.scene,
-        provider: `${p.provider}/${p.model}`,
-        promptTokens: p.usage.prompt_tokens,
-        completionTokens: p.usage.completion_tokens,
-        cachedTokens: p.usage.prompt_tokens_details?.cached_tokens ?? 0,
-        costEstimated: cost,
-        requestId: p.requestId,
-      },
-    });
-    await this.release(p.userId);
-    return { cost, usageId: record.id };
+    try {
+      const record = await this.prisma.usageRecord.create({
+        data: {
+          userId: p.userId,
+          deptId: p.deptId,
+          scene: p.scene,
+          provider: `${p.provider}/${p.model}`,
+          promptTokens: p.usage.prompt_tokens,
+          completionTokens: p.usage.completion_tokens,
+          cachedTokens: p.usage.prompt_tokens_details?.cached_tokens ?? 0,
+          costEstimated: cost,
+          requestId: p.requestId,
+        },
+      });
+      return { cost, usageId: record.id };
+    } finally {
+      // 结算即释放预扣键：落库失败也要释放，否则调用方只能靠超时（TTL 300s）解锁
+      await this.release(p.userId).catch(() => undefined);
+    }
   }
 
   /** 中断/失败部分结算：按已产生字符估算 completion（防费用漂移，计划书 8.2 失败分支） */
