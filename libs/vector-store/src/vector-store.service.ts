@@ -118,29 +118,24 @@ export class VectorStoreService implements OnApplicationShutdown {
     }
   }
 
-  /** 可见文档的当前版本集合：权限解析先行，避免全表 JOIN（计划书 8.6） */
-  async currentVersionIds(scope: AccessScope): Promise<string[]> {
+  /** 可见当前版本数（调试面板展示用）：只取 count，不把 id 拉回内存（#32） */
+  async countVisibleDocuments(scope: AccessScope): Promise<number> {
     const w = accessWhereSql(scope, 1, 'd.department_id');
-    const params = [...w.params];
-    const nowIdx = params.length + 1;
-    params.push(new Date().toISOString());
-    const { rows } = await this.pool.query<{ id: string }>(
-      `SELECT v.id
+    const params = [...w.params, new Date().toISOString()];
+    const { rows } = await this.pool.query<{ n: string }>(
+      `SELECT count(*)::text AS n
          FROM document_versions v
          JOIN documents d ON d.id = v.document_id
         WHERE d.status = 'active'
           AND d.current_version_id = v.id
-          AND (v.expires_at IS NULL OR v.expires_at > $${nowIdx})
+          AND (v.expires_at IS NULL OR v.expires_at > $${params.length})
           AND ${w.sql}`,
       params,
     );
-    return rows.map((r) => r.id);
+    return Number(rows[0]?.n ?? 0);
   }
 
-  /**
-   * 用户视角是否存在任何可检索版本（只探一行）：空召回时用来区分「库里对你就没东西」与「这个问题没依据」。
-   * 与 currentVersionIds 判定条件一致，但不等价于全部返回后再取 length —— 版本集合可能有上千条。
-   */
+  /** 用户视角是否存在任何可检索版本（只探一行）：空召回时区分「库里对你就没东西」与「这个问题没依据」 */
   async hasVisibleDocuments(scope: AccessScope): Promise<boolean> {
     const w = accessWhereSql(scope, 1, 'd.department_id');
     const params = [...w.params, new Date().toISOString()];

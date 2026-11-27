@@ -108,7 +108,7 @@ export class AdminController {
       fusedTop: result.debug?.fusedTop ?? null,
       rerankedTop: result.debug?.rerankedTop ?? null,
       rerankDegraded: result.degraded,
-      latencyBreakdown: result.debug?.breakdown ?? null,
+      latencyBreakdown: result.breakdown,
       totalMs: result.latencyMs,
     });
     return {

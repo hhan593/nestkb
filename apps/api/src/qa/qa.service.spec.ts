@@ -127,14 +127,7 @@ const emptyRetrieval = () => ({
   degraded: false,
   hitCount: 0,
   latencyMs: 5,
-  debug: {
-    versionIdCount: 0,
-    vectorTop: [],
-    ftsTop: [],
-    fusedTop: [],
-    rerankedTop: [],
-    breakdown: { embedMs: 1, vectorMs: 1, ftsMs: 1, fuseMs: 0, rerankMs: 0 },
-  },
+  breakdown: { embedMs: 1, vectorMs: 1, ftsMs: 1, fuseMs: 0, rerankMs: 0 },
 });
 
 const ragOpts = (sink: QaStreamSink) => ({ ...askOpts(sink), mode: 'rag' as const });

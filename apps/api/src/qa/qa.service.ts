@@ -152,6 +152,7 @@ export class QaService {
           degraded: false,
           hitCount: 0,
           latencyMs: Date.now() - t0,
+          breakdown: { embedMs: 0, vectorMs: 0, ftsMs: 0, fuseMs: 0, rerankMs: 0 },
         }, Date.now() - t0, 'completed');
         if (!conv.title) await this.prisma.conversation.update({ where: { id: conv.id }, data: { title: question.slice(0, 30) } });
         await this.queryLog.write({
@@ -223,13 +224,13 @@ export class QaService {
     let degraded = false;
     let hitCount = 0;
     let retrievalMs = 0;
-    let debug: RetrievalResult['debug'];
 
     if (mode === 'rag') {
       // ── 检索（权限 WHERE 前置 → 双路 → RRF → rerank）；topK 透传给检索层，meta 与实际召回一致
       let result: RetrievalResult;
       try {
-        result = await this.retrieval.retrieve(question, scope, { debug: true, topKFinal: topK });
+        // 常规问答不要 debug 明细：它每次都会拉可见版本集合、并把 4 份 top10 JSON 写进 query_logs（#32）
+        result = await this.retrieval.retrieve(question, scope, { topKFinal: topK });
       } catch (err) {
         this.logger.error('retrieval failed', { err: String(err) });
         sink.open({ messageId, requestId, retrieval: zeroMeta });
@@ -241,7 +242,6 @@ export class QaService {
       degraded = result.degraded;
       hitCount = result.hitCount;
       retrievalMs = result.latencyMs;
-      debug = result.debug;
 
       sink.open({
         messageId,
@@ -256,12 +256,9 @@ export class QaService {
         scene: 'qa',
         accessFilter: { deptId: user.deptId, isAdmin: user.role === 'admin' },
         hitCount,
-        vectorTop: debug?.vectorTop ?? null,
-        ftsTop: debug?.ftsTop ?? null,
-        fusedTop: debug?.fusedTop ?? null,
-        rerankedTop: debug?.rerankedTop ?? null,
+        // top10 明细只在 /admin/retrieval/debug 落库；常规问答留分段耗时即可定位慢在哪一段
         rerankDegraded: degraded,
-        latencyBreakdown: debug?.breakdown ?? null,
+        latencyBreakdown: result.breakdown,
         totalMs: result.latencyMs,
         requestId,
       });
