@@ -261,6 +261,10 @@ button { font-family: inherit; }
   padding: 12px;
 }
 .conv-scroll { flex: 1; overflow-y: auto; margin-top: 10px; }
+.conv-head { display: flex; align-items: center; gap: 6px; }
+.conv-head .btn { flex: 1; }
+/* 抽屉相关元素只在移动端出现（桌面端会话栏常驻，无需入口/遮罩/收起按钮） */
+.conv-drawer-close, .chat-mobile-bar, .conv-scrim { display: none; }
 .conv-item-row { display: flex; align-items: center; margin-bottom: 2px; border-radius: var(--r-md); }
 .conv-item-row:hover { background: rgba(28, 28, 25, 0.05); }
 .conv-item-row.active { background: var(--surface); box-shadow: var(--shadow-1); }
@@ -508,9 +512,39 @@ button { font-family: inherit; }
 
 @media (max-width: 900px) {
   .sidebar { width: 64px; padding: 12px 8px; }
-  .brand-name, .brand-sub, .nav-item span, .nav-label, .sidebar-foot { display: none; }
+  .brand-name, .brand-sub, .nav-item span, .nav-label { display: none; }
   .nav-item { justify-content: center; }
-  .conv-list { display: none; }
+  /* 侧栏收起后仍要能退出登录：只压缩配额展示，用户行与退出按钮保留 */
+  .sidebar-foot { padding: 8px 0 0; }
+  .quota-line, .quota-bar { display: none; }
+  .user-line { flex-direction: column; margin-top: 0; gap: 6px; }
+  .user-name, .user-dept { display: none; }
+  .logout-btn { margin-left: 0; }
+
+  /* 会话栏改抽屉：原先直接 display:none，移动端连新建/切换/删除会话的入口都没有 */
+  .conv-list {
+    position: fixed; top: 0; bottom: 0; left: 0;
+    width: 268px; max-width: 82vw;
+    z-index: 70;
+    transform: translateX(-102%);
+    transition: transform 200ms ease-out;
+    box-shadow: var(--shadow-2);
+  }
+  .conv-list.open { transform: none; }
+  .conv-scrim { display: block; position: fixed; inset: 0; z-index: 60; background: rgba(28, 28, 25, 0.4); }
+  .conv-drawer-close { display: grid; }
+  /* 触摸设备没有 hover：删除按钮必须常显，否则列表里点不到 */
+  .conv-del { opacity: 1; }
+
+  .chat-mobile-bar {
+    display: flex; align-items: center; gap: 8px; flex: none;
+    padding: 10px 14px; border-bottom: 1px solid var(--line);
+  }
+  .chat-mobile-bar .conv-title {
+    flex: 1; min-width: 0; font-size: var(--fs-sm); color: var(--ink-2);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .chat-scroll { padding: 18px 14px; }
   .page { padding: 20px 18px 40px; }
   .debug-grid { grid-template-columns: 1fr; }
 }
