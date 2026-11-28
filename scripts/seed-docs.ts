@@ -68,9 +68,14 @@ async function main(): Promise<void> {
       continue;
     }
 
+    // 元数据注释只是本脚本的传输载体：入库正文不带它，否则摄取时会形成一个垃圾块污染检索
+    const metaMatch = content.match(/<!--\s*[\s\S]*?-->/);
+    const body = (metaMatch ? content.replace(metaMatch[0], '') : content).trimStart();
+    const bodyBuffer = Buffer.from(body, 'utf8');
+
     const documentId = randomUUID();
     const versionId = randomUUID();
-    const checksum = createHash('sha256').update(buffer).digest('hex');
+    const checksum = createHash('sha256').update(bodyBuffer).digest('hex');
     const storageKey = `${documentId}/${versionId}.md`;
 
     await prisma.document.create({
@@ -98,7 +103,7 @@ async function main(): Promise<void> {
 
     const absDir = path.join(process.cwd(), env.storageDir, documentId);
     await fs.mkdir(absDir, { recursive: true });
-    await fs.writeFile(path.join(absDir, `${versionId}.md`), buffer);
+    await fs.writeFile(path.join(absDir, `${versionId}.md`), bodyBuffer);
 
     await queue.add(
       'ingest',
