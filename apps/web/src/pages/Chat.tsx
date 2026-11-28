@@ -1,12 +1,14 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ArrowUp, Check, Copy, MessageSquarePlus, Square, ThumbsDown, ThumbsUp, FileSearch, CircleAlert, X, Menu } from 'lucide-react';
+import { ArrowUp, Check, Copy, MessageSquarePlus, Square, ThumbsDown, ThumbsUp, FileSearch, CircleAlert, X, Menu, Pencil } from 'lucide-react';
 import { api, apiStream } from '../lib/api';
 import { parseSseStream } from '../lib/sse';
 import { useAuth } from '../lib/auth';
 import { parseBlocks, renderInline } from '../components/markdown';
+import { ConfirmDialog } from '../components/Dialogs';
 
 import {
   fmtCost,
+  fmtRelTime,
   REASON_LABEL,
   type CitationDto,
   type Conversation,
@@ -64,6 +66,10 @@ export default function Chat() {
   const [pageError, setPageError] = useState<string | null>(null);
   /** 移动端：会话栏是抽屉，≤900px 时默认收起（桌面端该状态无效果） */
   const [convDrawerOpen, setConvDrawerOpen] = useState(false);
+  /** #59-9 删除会话走统一确认对话框（替代原生 confirm） */
+  const [convToDelete, setConvToDelete] = useState<Conversation | null>(null);
+  /** #59-5 会话重命名：行内编辑（Enter 保存 / Esc 取消） */
+  const [renamingConv, setRenamingConv] = useState<{ id: string; draft: string } | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const messagesRef = useRef<LiveMessage[]>([]);
@@ -129,9 +135,6 @@ export default function Chat() {
   }, [messages]);
 
   const removeConv = useCallback(async (id: string) => {
-    // 破坏性操作先确认：与删除文档（Documents 页）保持一致，误触不该丢掉整段对话
-    const title = convs.find((c) => c.id === id)?.title || '新会话';
-    if (!window.confirm(`删除会话「${title}」？删除后无法恢复。`)) return;
     try {
       await api(`/qa/conversations/${id}`, { method: 'DELETE' });
     } catch (err) {
@@ -145,7 +148,23 @@ export default function Chat() {
       setConvDrawerOpen(false);
     }
     void loadConvs();
-  }, [activeConv, convs, loadConvs]);
+  }, [activeConv, loadConvs]);
+
+  /** #59-5 重命名会话：空标题不发请求，成功后同步列表并退出编辑态 */
+  const renameConv = useCallback(
+    async (id: string, title: string) => {
+      const trimmed = title.trim();
+      setRenamingConv(null);
+      if (!trimmed) return;
+      try {
+        await api(`/qa/conversations/${id}`, { method: 'PATCH', body: { title: trimmed } });
+      } catch (err) {
+        setPageError(err instanceof Error ? err.message : '重命名失败');
+      }
+      void loadConvs();
+    },
+    [loadConvs],
+  );
 
   const newConv = useCallback(async () => {
     try {
@@ -325,16 +344,63 @@ export default function Chat() {
           {convs.length === 0 && <div style={{ fontSize: 12, color: 'var(--ink-3)', textAlign: 'center', padding: 16 }}>还没有会话</div>}
           {convs.map((c) => (
             <div key={c.id} className={`conv-item-row${c.id === activeConv ? ' active' : ''}`}>
-              <button className={`conv-item${c.id === activeConv ? ' active' : ''}`} onClick={() => void openConv(c.id)}>
-                {c.title || '新会话'}
-              </button>
-              <button className="icon-btn conv-del" title="删除会话" onClick={() => void removeConv(c.id)}>
+              {renamingConv?.id === c.id ? (
+                <input
+                  className="conv-rename-input"
+                  value={renamingConv.draft}
+                  autoFocus
+                  maxLength={60}
+                  onChange={(e) => setRenamingConv({ id: c.id, draft: e.target.value })}
+                  onBlur={() => void renameConv(c.id, renamingConv.draft)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') void renameConv(c.id, renamingConv.draft);
+                    if (e.key === 'Escape') setRenamingConv(null);
+                  }}
+                />
+              ) : (
+                <>
+                  <button className={`conv-item${c.id === activeConv ? ' active' : ''}`} onClick={() => void openConv(c.id)}>
+                    {c.title || '新会话'}
+                  </button>
+                  {/* #59-4 相对时间戳：hover/active 时显示，区分同名相邻会话的新旧 */}
+                  <span className="conv-time">{fmtRelTime(c.updatedAt)}</span>
+                  <button
+                    className="icon-btn conv-rename-btn"
+                    title="重命名"
+                    aria-label={`重命名会话 ${c.title || '新会话'}`}
+                    onClick={() => setRenamingConv({ id: c.id, draft: c.title || '' })}
+                  >
+                    <Pencil />
+                  </button>
+                </>
+              )}
+              <button
+                className="icon-btn conv-del"
+                title="删除会话"
+                aria-label={`删除会话 ${c.title || '新会话'}`}
+                onClick={() => setConvToDelete(c)}
+              >
                 <X />
               </button>
             </div>
           ))}
         </div>
       </aside>
+
+      {convToDelete && (
+        <ConfirmDialog
+          title="删除会话"
+          message={`删除会话「${convToDelete.title || '新会话'}」？删除后无法恢复。`}
+          confirmLabel="删除"
+          danger
+          onConfirm={() => {
+            const id = convToDelete.id;
+            setConvToDelete(null);
+            void removeConv(id);
+          }}
+          onClose={() => setConvToDelete(null)}
+        />
+      )}
 
       <div className="chat-main">
         {/* 移动端：会话栏变成抽屉，必须有一个常驻入口，否则新建/切换会话都没有入口 */}
@@ -648,6 +714,8 @@ function CopyAnswerButton({ text }: { text: string }) {
 }
 
 function CitationList({ citations }: { citations: CitationDto[] }) {
+  // #59-2 引文展开：chunk 全文 >200 字时提供"展开全文"核对原文（历史快照无 fullContent 则不显示）
+  const [expanded, setExpanded] = useState<Record<number, boolean>>({});
   return (
     <div className="citations">
       {citations.map((c) => (
@@ -660,7 +728,17 @@ function CitationList({ citations }: { citations: CitationDto[] }) {
             {c.effectiveAt && <span style={{ marginLeft: 'auto', fontSize: 11, color: 'var(--ink-3)' }}>生效 {c.effectiveAt.slice(0, 10)}</span>}
           </div>
           <div className="citation-path">{c.headingPath || '（无章节）'}</div>
-          <div className="citation-quote" style={{ marginTop: 4 }}>{c.quote}</div>
+          <div className={`citation-quote${expanded[c.no] ? ' expanded' : ''}`} style={{ marginTop: 4 }}>
+            {expanded[c.no] && c.fullContent ? c.fullContent : c.quote}
+          </div>
+          {c.fullContent && (
+            <button
+              className="citation-more"
+              onClick={() => setExpanded((prev) => ({ ...prev, [c.no]: !prev[c.no] }))}
+            >
+              {expanded[c.no] ? '收起' : '展开全文'}
+            </button>
+          )}
         </div>
       ))}
     </div>

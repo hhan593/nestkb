@@ -23,3 +23,9 @@ export class CreateConversationDto {
   @Length(0, 100)
   title?: string;
 }
+
+export class RenameConversationDto {
+  @IsString()
+  @Length(1, 60, { message: '标题长度需在 1~60 字符之间' })
+  title!: string;
+}

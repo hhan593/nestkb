@@ -1,10 +1,10 @@
-import { Body, Controller, Delete, Get, HttpCode, HttpException, HttpStatus, Inject, Param, Post, Req, Res, UseGuards } from '@nestjs/common';
+import { Body, Controller, Delete, Get, HttpCode, HttpException, HttpStatus, Inject, Param, Patch, Post, Req, Res, UseGuards } from '@nestjs/common';
 import type { FastifyReply, FastifyRequest } from 'fastify';
 import { QaSseEvent } from '@lib/contracts';
 import { TraceService } from '@app/common';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import type { AuthedUser } from '../auth/auth.service';
-import { AskDto, CreateConversationDto } from './dto';
+import { AskDto, CreateConversationDto, RenameConversationDto } from './dto';
 import { QaRateLimitGuard } from './qa-rate-limit.guard';
 import { QaService, QaStreamSink } from './qa.service';
 
@@ -33,6 +33,11 @@ export class QaController {
   @Get('conversations/:id')
   async detail(@CurrentUser() user: AuthedUser, @Param('id') id: string) {
     return this.qa.getConversation(user, id);
+  }
+
+  @Patch('conversations/:id')
+  async rename(@CurrentUser() user: AuthedUser, @Param('id') id: string, @Body() dto: RenameConversationDto) {
+    return this.qa.renameConversation(user, id, dto.title);
   }
 
   @Delete('conversations/:id')

@@ -28,6 +28,65 @@ function monthRange(): [string, string] {
   return [fmt(from), fmt(to)];
 }
 
+/**
+ * #59-8 按天趋势折线图：成本（朱砂）与问答次数（靛蓝）双轴，无图表依赖、纯 SVG 手绘。
+ * 点悬停有 <title> 原生提示；日期只标首/中/尾，避免拥挤。
+ */
+function DayTrendChart({ rows }: { rows: UsageSummary['rows'] }) {
+  const w = 760;
+  const h = 190;
+  const padL = 52;
+  const padR = 52;
+  const padT = 14;
+  const padB = 28;
+  const iw = w - padL - padR;
+  const ih = h - padT - padB;
+  const maxCost = Math.max(...rows.map((r) => r.costCny), 1e-6);
+  const maxCalls = Math.max(...rows.map((r) => r.qaCalls), 1);
+  const x = (i: number): number => padL + (rows.length === 1 ? iw / 2 : (i / (rows.length - 1)) * iw);
+  const yCost = (v: number): number => padT + ih - (v / maxCost) * ih;
+  const yCalls = (v: number): number => padT + ih - (v / maxCalls) * ih;
+  const linePts = rows.map((r, i) => `${x(i)},${yCost(r.costCny)}`).join(' ');
+  const callPts = rows.map((r, i) => `${x(i)},${yCalls(r.qaCalls)}`).join(' ');
+  const areaPath =
+    rows.length > 1
+      ? `M ${x(0)},${padT + ih} L ${linePts.split(' ').join(' L ')} L ${x(rows.length - 1)},${padT + ih} Z`
+      : '';
+  const labelIdx = rows.length <= 2 ? rows.map((_, i) => i) : [0, Math.floor((rows.length - 1) / 2), rows.length - 1];
+  const shortDay = (label: string): string => label.slice(5); // yyyy-MM-dd → MM-dd
+  return (
+    <div className="card card-pad cost-chart">
+      <svg viewBox={`0 0 ${w} ${h}`} role="img" aria-label="按天成本与问答次数趋势">
+        {[0.25, 0.5, 0.75].map((f) => (
+          <line key={f} className="cost-chart-grid" x1={padL} x2={w - padR} y1={padT + ih * f} y2={padT + ih * f} />
+        ))}
+        <text className="cost-chart-label" x={4} y={padT + ih + 4}>0</text>
+        <text className="cost-chart-label" x={4} y={padT + 4}>{fmtCost(maxCost)}元</text>
+        <text className="cost-chart-label" x={w - padR + 4} y={padT + 4}>{maxCalls}次</text>
+        {areaPath && <path className="cost-chart-area" d={areaPath} />}
+        <polyline className="cost-chart-line" points={linePts} />
+        <polyline points={callPts} fill="none" stroke="var(--indigo)" strokeWidth={1.5} strokeDasharray="4 3" />
+        {rows.map((r, i) => (
+          <g key={r.key}>
+            <circle className="cost-chart-dot" cx={x(i)} cy={yCost(r.costCny)} r={3}>
+              <title>{`${r.label}：${fmtCost(r.costCny)} 元 / ${r.qaCalls} 次`}</title>
+            </circle>
+          </g>
+        ))}
+        {labelIdx.map((i) => (
+          <text key={i} className="cost-chart-label" x={x(i)} y={h - 8} textAnchor="middle">
+            {shortDay(rows[i].label)}
+          </text>
+        ))}
+      </svg>
+      <div className="cost-chart-legend">
+        <span><span className="swatch" />成本（元 / 天）</span>
+        <span><span className="swatch" style={{ background: 'var(--indigo)' }} />问答次数（次 / 天）</span>
+      </div>
+    </div>
+  );
+}
+
 export default function Usage() {
   const [dim, setDim] = useState<(typeof DIMS)[number]['key']>('dept');
   const [from, to] = monthRange();
@@ -99,7 +158,9 @@ export default function Usage() {
         ) : data === null || data.rows.length === 0 ? (
           <div className="card card-pad empty">所选时间范围内没有 usage 记录</div>
         ) : (
-          <div className="card" style={{ overflow: 'hidden' }}>
+          <>
+            {dim === 'day' && <DayTrendChart rows={data.rows} />}
+            <div className="card" style={{ overflow: 'hidden' }}>
             <table className="table">
               <thead>
                 <tr>
@@ -127,6 +188,7 @@ export default function Usage() {
               </tbody>
             </table>
           </div>
+          </>
         )}
       </div>
     </div>

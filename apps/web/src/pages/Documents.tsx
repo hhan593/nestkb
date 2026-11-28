@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
-import { CircleAlert, CalendarClock, FilePlus2, FileText, History, KeyRound, RefreshCw, Trash2, Upload, X } from 'lucide-react';
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
+import { CircleAlert, CalendarClock, FilePlus2, FileText, History, KeyRound, RefreshCw, Search, Trash2, Upload, X } from 'lucide-react';
 import { api } from '../lib/api';
 import { useAuth } from '../lib/auth';
+import { ConfirmDialog, DialogWarning, PromptDialog } from '../components/Dialogs';
 import {
   ACCESS_LEVEL_LABEL,
   fmtDate,
@@ -10,6 +11,10 @@ import {
   type DocumentRow,
   type VersionDto,
 } from '../lib/types';
+
+/** #59-7 列排序：标题/当前版本/块数/生效时间，点击表头切换升降序 */
+type SortKey = 'title' | 'versionNo' | 'chunkCount' | 'effectiveAt';
+type SortDir = 'asc' | 'desc';
 
 const stageBadge = (stage: string | undefined): { cls: string; label: string } => {
   switch (stage) {
@@ -27,6 +32,14 @@ export default function Documents() {
   const [uploadOpen, setUploadOpen] = useState<false | 'new' | 'version'>(false);
   const [detailDoc, setDetailDoc] = useState<{ doc: DocumentRow; versions: VersionDto[] } | null>(null);
   const [grantDoc, setGrantDoc] = useState<{ doc: DocumentRow; depts: Array<{ id: string; name: string }> } | null>(null);
+  /** #59-7 搜索 + 排序（客户端，pageSize=50 内足够） */
+  const [query, setQuery] = useState('');
+  const [sortKey, setSortKey] = useState<SortKey>('title');
+  const [sortDir, setSortDir] = useState<SortDir>('asc');
+  /** #59-9 删除/标记过期走统一对话框（替代原生 confirm/prompt） */
+  const [docToDelete, setDocToDelete] = useState<DocumentRow | null>(null);
+  const [docToExpire, setDocToExpire] = useState<DocumentRow | null>(null);
+  const [expireBusy, setExpireBusy] = useState(false);
   const pollRef = useRef<number | null>(null);
 
   const load = useCallback(async () => {
@@ -61,11 +74,18 @@ export default function Documents() {
     };
   }, [hasPending, load]);
 
-  const remove = useCallback(async (doc: DocumentRow) => {
-    if (!window.confirm(`删除《${doc.title}》？其全部版本与检索块将一并清除。`)) return;
-    await api(`/documents/${doc.id}`, { method: 'DELETE' });
-    void load();
-  }, [load]);
+  const remove = useCallback(
+    async (doc: DocumentRow) => {
+      try {
+        await api(`/documents/${doc.id}`, { method: 'DELETE' });
+      } catch (err) {
+        setError(err instanceof Error ? err.message : '删除失败');
+        return;
+      }
+      void load();
+    },
+    [load],
+  );
 
   const reingest = useCallback(async (doc: DocumentRow) => {
     await api(`/documents/${doc.id}/reingest`, { body: {} });
@@ -77,27 +97,76 @@ export default function Documents() {
     setDetailDoc({ doc, versions: detail.versions });
   }, []);
 
-  const markExpired = useCallback(async (doc: DocumentRow) => {
-    const input = window.prompt('标记为过期的时间（过期后不可被检索引用）：', new Date(Date.now() + 86400_000).toISOString().slice(0, 16));
-    if (!input) return;
-    const parsed = new Date(input);
-    if (Number.isNaN(parsed.getTime())) {
-      setError('时间格式不合法，请重新输入');
-      return;
-    }
-    try {
-      await api(`/admin/documents/${doc.id}/expire`, { body: { expiresAt: parsed.toISOString() } });
-      setError(null);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : '标记过期失败');
-    }
-    void load();
-  }, [load]);
+  /** 标记过期（#59-9 由 window.prompt 换 PromptDialog；datetime-local 值按本地时区解析） */
+  const markExpired = useCallback(
+    async (doc: DocumentRow, inputValue: string) => {
+      const parsed = new Date(inputValue);
+      if (Number.isNaN(parsed.getTime())) {
+        setError('时间格式不合法，请重新输入');
+        return;
+      }
+      setExpireBusy(true);
+      try {
+        await api(`/admin/documents/${doc.id}/expire`, { body: { expiresAt: parsed.toISOString() } });
+        setError(null);
+        setDocToExpire(null);
+      } catch (err) {
+        setError(err instanceof Error ? err.message : '标记过期失败');
+      } finally {
+        setExpireBusy(false);
+      }
+      void load();
+    },
+    [load],
+  );
 
   const openGrants = useCallback(async (doc: DocumentRow) => {
     const depts = await api<Array<{ id: string; name: string }>>('/admin/departments');
     setGrantDoc({ doc, depts });
   }, []);
+
+  // #59-7 客户端搜索 + 排序（title 忽略大小写；空值排末尾）
+  const visibleRows = useMemo(() => {
+    const all = rows ?? [];
+    const q = query.trim().toLowerCase();
+    const filtered = q ? all.filter((r) => r.title.toLowerCase().includes(q)) : all;
+    const dir = sortDir === 'asc' ? 1 : -1;
+    const val = (r: DocumentRow): string | number => {
+      switch (sortKey) {
+        case 'title': return r.title.toLowerCase();
+        case 'versionNo': return r.currentVersion?.versionNo ?? -1;
+        case 'chunkCount': return r.currentVersion?.ingestion?.chunkCount ?? -1;
+        case 'effectiveAt': return r.currentVersion?.effectiveAt ?? '';
+      }
+    };
+    return [...filtered].sort((a, b) => {
+      const va = val(a);
+      const vb = val(b);
+      if (va < vb) return -dir;
+      if (va > vb) return dir;
+      return 0;
+    });
+  }, [rows, query, sortKey, sortDir]);
+
+  const toggleSort = (key: SortKey): void => {
+    if (sortKey === key) {
+      setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'));
+    } else {
+      setSortKey(key);
+      setSortDir('asc');
+    }
+  };
+
+  const sortArrow = (key: SortKey): string => (sortKey === key ? (sortDir === 'asc' ? '↑' : '↓') : '');
+
+  const thSort = (key: SortKey, label: string, extraStyle?: CSSProperties) => (
+    <th style={extraStyle}>
+      <button className="th-sort" onClick={() => toggleSort(key)}>
+        {label}
+        <span className="arrow">{sortArrow(key)}</span>
+      </button>
+    </th>
+  );
 
   return (
     <div className="page">
@@ -112,7 +181,31 @@ export default function Documents() {
           </button>
         </div>
 
-        {error && <div className="alert-banner alert-critical"><CircleAlert /> {error}</div>}
+        <div style={{ display: 'flex', gap: 10, marginBottom: 14, alignItems: 'center' }}>
+          <div style={{ position: 'relative', flex: 1, maxWidth: 320 }}>
+            <Search style={{ position: 'absolute', left: 10, top: 9, width: 14, height: 14, color: 'var(--ink-3)' }} />
+            <input
+              className="input"
+              style={{ paddingLeft: 30 }}
+              placeholder="按标题搜索文档…"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+            />
+          </div>
+          {query && <span style={{ fontSize: 12, color: 'var(--ink-3)' }}>{visibleRows.length} / {rows?.length ?? 0} 篇</span>}
+        </div>
+
+        {error && (
+          <div className="alert-banner alert-critical">
+            <CircleAlert /> {error}
+            <div className="alert-actions">
+              <button className="btn-retry" onClick={() => void load()}>重试</button>
+              <button className="btn-retry" title="关闭" aria-label="关闭" onClick={() => setError(null)}>
+                <X style={{ width: 13, height: 13, display: 'block' }} />
+              </button>
+            </div>
+          </div>
+        )}
 
         {rows === null ? (
           <div className="spinner" style={{ margin: '60px auto' }} />
@@ -132,17 +225,24 @@ export default function Documents() {
             <table className="table">
               <thead>
                 <tr>
-                  <th>标题</th>
+                  {thSort('title', '标题')}
                   <th>可见范围</th>
-                  <th>当前版本</th>
+                  {thSort('versionNo', '当前版本')}
                   <th>摄取状态</th>
-                  <th>块数</th>
-                  <th>生效 / 过期</th>
+                  {thSort('chunkCount', '块数')}
+                  {thSort('effectiveAt', '生效 / 过期')}
                   <th style={{ width: 130 }}></th>
                 </tr>
               </thead>
               <tbody>
-                {rows.map((d) => {
+                {visibleRows.length === 0 && rows.length > 0 && (
+                  <tr>
+                    <td colSpan={7} className="empty" style={{ padding: '28px 20px' }}>
+                      没有匹配「{query}」的文档
+                    </td>
+                  </tr>
+                )}
+                {visibleRows.map((d) => {
                   const ing = d.currentVersion?.ingestion;
                   const badge = stageBadge(ing?.stage);
                   return (
@@ -171,14 +271,14 @@ export default function Documents() {
                           <button className="icon-btn" title="版本历史" onClick={() => void openDetail(d)}><History /></button>
                           {me?.role === 'admin' && (
                             <>
-                              <button className="icon-btn" title="标记过期" onClick={() => void markExpired(d)}><CalendarClock /></button>
+                              <button className="icon-btn" title="标记过期" onClick={() => setDocToExpire(d)}><CalendarClock /></button>
                               <button className="icon-btn" title="白名单授权" onClick={() => void openGrants(d)}><KeyRound /></button>
                               {ing?.stage === 'failed' && (
                                 <button className="icon-btn" title="重放摄取（DLQ）" onClick={() => void reingest(d)}><RefreshCw /></button>
                               )}
                             </>
                           )}
-                          <button className="icon-btn" title="删除" onClick={() => void remove(d)}><Trash2 /></button>
+                          <button className="icon-btn" title="删除" onClick={() => setDocToDelete(d)}><Trash2 /></button>
                         </div>
                       </td>
                     </tr>
@@ -207,6 +307,41 @@ export default function Documents() {
           doc={grantDoc.doc}
           depts={grantDoc.depts}
           onClose={() => setGrantDoc(null)}
+        />
+      )}
+
+      {docToDelete && (
+        <ConfirmDialog
+          title="删除文档"
+          message={
+            <>
+              删除《{docToDelete.title}》？
+              <DialogWarning>其全部版本与检索块将一并清除，此操作无法恢复。</DialogWarning>
+            </>
+          }
+          confirmLabel="删除"
+          danger
+          onConfirm={() => {
+            const doc = docToDelete;
+            setDocToDelete(null);
+            void remove(doc);
+          }}
+          onClose={() => setDocToDelete(null)}
+        />
+      )}
+
+      {docToExpire && (
+        <PromptDialog
+          title="标记过期"
+          message={`《${docToExpire.title}》到达过期时间后将不可再被检索引用。`}
+          fieldLabel="过期时间"
+          inputType="datetime-local"
+          submitLabel="标记过期"
+          busy={expireBusy}
+          initialValue={new Date(Date.now() + 86_400_000).toISOString().slice(0, 16)}
+          hint="过期后文档保留但不再进入检索结果（管理员可改回）"
+          onSubmit={(v) => void markExpired(docToExpire, v)}
+          onClose={() => setDocToExpire(null)}
         />
       )}
 

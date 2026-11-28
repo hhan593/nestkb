@@ -39,6 +39,8 @@ export interface CitationDto {
   headingPath: string;
   /** 被引 chunk 原文片段（截断 200 字） */
   quote: string;
+  /** chunk 完整原文（>200 字时携带，供引用卡"展开全文"核对；历史会话快照无此字段） */
+  fullContent?: string;
   effectiveAt: string | null;
   /** 由 expires_at 推导（P1 时效治理） */
   possiblyOutdated: boolean;
