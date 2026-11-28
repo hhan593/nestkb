@@ -2,16 +2,105 @@
   "version": "v1",
   "description": "NestKB 评测集 v1：fact 35 目标（此处骨架 9 条）/ table 5 / timeliness 5 / deny 5。goldMarkers 为语料锚点短语，跑批时解析为 goldChunkIds。prompt 迭代期间不许改它（防过拟合，计划书 难点 5）。",
   "cases": [
-    { "id": "f-001", "type": "fact", "question": "员工试用期考核不通过怎么处理？", "goldAnswer": "延长试用或依法解除劳动合同", "goldMarkers": ["延长试用或依法解除劳动合同"] },
-    { "id": "f-002", "type": "fact", "question": "年假一共有多少天？", "goldAnswer": "按工龄 5/10/15 天", "goldMarkers": ["年假"] },
-    { "id": "f-003", "type": "fact", "question": "报销单据需要在多少天内提交？", "goldAnswer": "30 天", "goldMarkers": ["报销单据须在费用发生后 30 天内提交"] },
-    { "id": "f-004", "type": "fact", "question": "代码评审需要几个人批准？", "goldAnswer": "至少 1 名高级工程师", "goldMarkers": ["至少一名高级工程师批准"] },
-    { "id": "f-005", "type": "fact", "question": "生产环境发布需要什么审批？", "goldAnswer": "技术负责人审批 + 灰度", "goldMarkers": ["技术负责人审批", "灰度"] },
-    { "id": "f-006", "type": "fact", "question": "产假的法定天数是多少？", "goldAnswer": "158 天", "goldMarkers": ["产假 158 天"] },
-    { "id": "f-007", "type": "fact", "question": "试用期社保从什么时候开始缴纳？", "goldAnswer": "入职当月起", "goldMarkers": ["入职当月起缴纳"] },
-    { "id": "t-001", "type": "table", "question": "差旅住宿标准中西部地区的上限是多少？", "goldAnswer": "见差旅住宿标准表（西部列）", "goldMarkers": ["西部"] },
-    { "id": "x-001", "type": "deny", "question": "公司 2027 年的营收目标是多少？", "goldAnswer": null, "goldMarkers": [], "expectDeny": true },
-    { "id": "x-002", "type": "deny", "question": "公司市值现在是多少？", "goldAnswer": null, "goldMarkers": [], "expectDeny": true },
-    { "id": "t-002", "type": "timeliness", "question": "旧版考勤制度下迟到怎么扣款？", "goldAnswer": null, "goldMarkers": ["旧版考勤制度"] }
+    {
+      "id": "f-001",
+      "type": "fact",
+      "question": "员工试用期考核不通过怎么处理？",
+      "goldAnswer": "延长试用或依法解除劳动合同",
+      "goldMarkers": [
+        "延长试用或依法解除劳动合同"
+      ]
+    },
+    {
+      "id": "f-002",
+      "type": "fact",
+      "question": "年假一共有多少天？",
+      "goldAnswer": "按工龄 5/10/15 天",
+      "goldMarkers": [
+        "年假"
+      ]
+    },
+    {
+      "id": "f-003",
+      "type": "fact",
+      "question": "报销单据需要在多少天内提交？",
+      "goldAnswer": "30 天",
+      "goldMarkers": [
+        "报销单据须在费用发生后 30 天内提交"
+      ]
+    },
+    {
+      "id": "f-004",
+      "type": "fact",
+      "question": "代码评审需要几个人批准？",
+      "goldAnswer": "至少 1 名高级工程师",
+      "goldMarkers": [
+        "至少一名高级工程师批准"
+      ]
+    },
+    {
+      "id": "f-005",
+      "type": "fact",
+      "question": "生产环境发布需要什么审批？",
+      "goldAnswer": "技术负责人审批 + 灰度",
+      "goldMarkers": [
+        "技术负责人审批",
+        "灰度"
+      ]
+    },
+    {
+      "id": "f-006",
+      "type": "fact",
+      "question": "产假的法定天数是多少？",
+      "goldAnswer": "158 天",
+      "goldMarkers": [
+        "产假 158 天"
+      ]
+    },
+    {
+      "id": "f-007",
+      "type": "fact",
+      "question": "试用期社保从什么时候开始缴纳？",
+      "goldAnswer": "入职当月起",
+      "goldMarkers": [
+        "入职当月起缴纳"
+      ]
+    },
+    {
+      "id": "t-001",
+      "type": "table",
+      "question": "差旅住宿标准中西部地区的上限是多少？",
+      "goldAnswer": "见差旅住宿标准表（西部列）",
+      "goldMarkers": [
+        "西部"
+      ]
+    },
+    {
+      "id": "x-001",
+      "type": "deny",
+      "question": "公司 2027 年的营收目标是多少？",
+      "goldAnswer": null,
+      "goldMarkers": [],
+      "expectDeny": true
+    },
+    {
+      "id": "x-002",
+      "type": "deny",
+      "question": "公司市值现在是多少？",
+      "goldAnswer": null,
+      "goldMarkers": [],
+      "expectDeny": true
+    },
+    {
+      "id": "t-002",
+      "type": "timeliness",
+      "question": "旧版考勤制度下迟到怎么扣款？",
+      "goldAnswer": null,
+      "goldMarkers": [
+        "旧版考勤制度"
+      ],
+      "expectDeny": true,
+      "note": "过期文档不可召回（T06）：系统正确拒答即通过"
+    }
   ]
 }

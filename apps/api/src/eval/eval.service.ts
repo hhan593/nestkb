@@ -25,7 +25,7 @@ interface CaseResult {
   question: string;
   caseType: string;
   recall5: number | null;
-  citationAcc: number;
+  citationAcc: number | null;
   fidelity: number;
   relevance: number | null;
   expectDeny: boolean;
@@ -98,11 +98,16 @@ export class EvalService {
         completionTokens += stream.usage.completion_tokens;
       }
 
-      // ── 指标 2 引用准确率（确定性为主）：被引编号指向 gold chunk 或同文档近邻的比例
+      // ── 指标 2 引用准确率：deny 类用例的正确行为是拒答且无引用 → 记满分；
+      //    事实类用例：被引编号指向 gold chunk 或同文档近邻的比例（幻觉引用计入失败）
       const { citations } = validateCitations(answer, retrieval.chunks);
-      const citAcc = citations.length
-        ? citations.filter((x) => isGoldOrNeighbor(x.chunkId, x.documentId, goldRefs)).length / citations.length
-        : 0;
+      // 拒答类用例的"引用准确率"无意义（模型在拒绝说明里提及资料范围是正当行为），
+      // 正确性已由 denyOk + fidelity 覆盖 → 记 null，不参与均值
+      const citAcc = c.expectDeny
+        ? null
+        : citations.length
+          ? citations.filter((x) => isGoldOrNeighbor(x.chunkId, x.documentId, goldRefs)).length / citations.length
+          : 0;
       const denyPassed = c.expectDeny ? /无法回答|没有找到|没有(检索到)?(相关)?依据|无访问权限/.test(answer) : null;
 
       // ── 指标 3 忠实度（LLM-as-judge，N 次采样均值记方差）
