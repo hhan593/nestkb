@@ -76,13 +76,21 @@ export class AuthService {
     if (payload.type !== 'refresh') {
       throw new UnauthorizedException({ code: ErrorCodes.UNAUTHORIZED, message: '需要 refresh token' });
     }
-    if (await this.isRevoked(refreshToken)) {
-      throw new UnauthorizedException({ code: ErrorCodes.UNAUTHORIZED, message: 'refresh token 已吊销' });
+    // 轮换语义（原子一次性）：SET NX 占位成功才允许签发新对——并发重放同一 token 只有一个
+    // 能通过，其余按已吊销拒绝（修 TOCTOU：原先 isRevoked 检查与 revoke 非原子）
+    const ttlSec = payload.exp ? Math.max(1, payload.exp - Math.floor(Date.now() / 1000)) : 60;
+    const rotated = await this.redis.set(
+      `auth:revoked:${this.sha256(refreshToken)}`,
+      '1',
+      'EX',
+      ttlSec,
+      'NX',
+    );
+    if (!rotated) {
+      throw new UnauthorizedException({ code: ErrorCodes.UNAUTHORIZED, message: 'refresh token 已吊销或已被使用' });
     }
     const user = await this.users.findByEmailWithDept(payload.email);
     if (!user) throw new UnauthorizedException({ code: ErrorCodes.UNAUTHORIZED, message: '用户不存在' });
-    // 轮换语义：旧 refresh token 立即作废（一次性），防止重放
-    await this.revoke(refreshToken);
     return this.signTokens(user);
   }
 

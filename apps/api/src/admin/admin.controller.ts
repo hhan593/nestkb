@@ -1,4 +1,5 @@
 import { BadRequestException, Body, Controller, Get, Param, Post, Query } from '@nestjs/common';
+import { randomUUID } from 'node:crypto';
 import { AccessScope, HybridRetrievalService } from '@lib/vector-store';
 import { Roles } from '../auth/guards/roles.guard';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
@@ -14,7 +15,7 @@ import { IsDateString, IsIn, IsInt, IsOptional, IsString, IsUUID, Min } from 'cl
 
 class UsageQueryDto {
   @IsOptional()
-  @IsString()
+  @IsIn(['dept', 'user', 'day', 'scene'], { message: 'dim 只支持 dept/user/day/scene' })
   dim?: 'dept' | 'user' | 'day' | 'scene';
 
   @IsDateString({}, { message: 'from 需为 ISO 日期' })
@@ -57,7 +58,6 @@ class ImportCasesDto {
     expectDeny?: boolean;
   }>;
 }
-void ImportCasesDto;
 
 /** 管理端（计划书 7.2-15/16/17 + P1）：成本看板 / 检索调试 / 时效与配额治理 */
 @Controller('admin')
@@ -94,6 +94,9 @@ export class AdminController {
     if (Number.isNaN(from.getTime()) || Number.isNaN(to.getTime())) {
       throw new BadRequestException('from/to 日期不合法');
     }
+    if (to.getTime() - from.getTime() > 366 * 86400_000) {
+      throw new BadRequestException('查询范围最多 366 天');
+    }
     return this.admin.usageSummary(dim, from, to);
   }
 
@@ -105,8 +108,9 @@ export class AdminController {
     @Query('deptId') deptId?: string,
   ): Promise<unknown> {
     if (!q?.trim()) throw new BadRequestException('缺少 q 参数');
+    // 部门视角模拟：userId 用一次性随机值——admin 的个人白名单授权不应出现在复现结果里（#55.9）
     const scope: AccessScope = deptId
-      ? { userId: user.userId, deptId, isAdmin: false } // 以指定部门视角复现权限过滤
+      ? { userId: randomUUID(), deptId, isAdmin: false }
       : { userId: user.userId, deptId: user.deptId, isAdmin: true };
     const result = await this.retrieval.retrieve(q, scope, { debug: true });
     await this.queryLog.write({

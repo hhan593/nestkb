@@ -1,5 +1,7 @@
+import { randomUUID } from 'node:crypto';
 import { Inject, Injectable } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
+import { monthStartUtc8 } from '@lib/contracts';
 import {
   FAITHFULNESS_SYSTEM,
   RELEVANCE_SYSTEM,
@@ -11,7 +13,8 @@ import {
 } from '@lib/prompts';
 import { AccessScope, HybridRetrievalService, VectorStoreService } from '@lib/vector-store';
 import { LlmChatService } from '@lib/llm';
-import { AppEnv, ENV } from '@app/common';
+import { AppEnv, ENV, REDIS } from '@app/common';
+import type Redis from 'ioredis';
 import { PrismaService } from '@app/prisma';
 import type { AuthedUser } from '../auth/auth.service';
 
@@ -53,6 +56,7 @@ interface JudgeUsage {
 export class EvalService {
   constructor(
     private readonly prisma: PrismaService,
+    @Inject(REDIS) private readonly redis: Redis,
     private readonly retrieval: HybridRetrievalService,
     private readonly store: VectorStoreService,
     private readonly llm: LlmChatService,
@@ -64,9 +68,39 @@ export class EvalService {
     if (!cases.length) throw new Error('评测集为空：先运行 pnpm seed 或导入用例');
     const scope: AccessScope = { userId: user.userId, deptId: user.deptId, isAdmin: true };
 
+    // 防重入锁：连点两次即两份全量 LLM 成本（#53）
+    const lockKey = 'eval:running';
+    const lockToken = randomUUID();
+    const locked = await this.redis.set(lockKey, lockToken, 'EX', 1800, 'NX');
+    if (!locked) throw new Error('已有评估回归在执行中，请等待完成后再触发');
+    // 配额预检：耗尽的部门不允许再烧评估预算
+    const dept = await this.prisma.department.findUniqueOrThrow({ where: { id: user.deptId } });
+    const used = await this.prisma.usageRecord.aggregate({
+      _sum: { costEstimated: true },
+      where: { deptId: user.deptId, createdAt: { gte: monthStartUtc8() } },
+    });
+    if (Number(dept.quotaMonth) <= Number(used._sum.costEstimated ?? 0)) {
+      throw new Error('部门月度配额已耗尽，无法运行评估');
+    }
+
     // gold 标记短语 → chunk id 解析（每次 run 缓存一次）
     const goldCache = new Map<string, GoldRef[]>();
     const detail: CaseResult[] = [];
+    // 逐 case 落 usage：中途失败时已消耗的 token 费用不丢失（#53）
+    const persistCaseUsage = async (prompt: number, completion: number): Promise<void> => {
+      if (prompt + completion <= 0) return;
+      await this.prisma.usageRecord.create({
+        data: {
+          userId: user.userId,
+          deptId: user.deptId,
+          scene: 'eval',
+          provider: `${this.llm.providerName}/${this.llm.model}`,
+          promptTokens: prompt,
+          completionTokens: completion,
+          costEstimated: this.llm.estimateCost({ prompt_tokens: prompt, completion_tokens: completion }),
+        },
+      });
+    };
     let promptTokens = 0;
     let completionTokens = 0;
 
@@ -148,7 +182,8 @@ export class EvalService {
     const totalCost = this.llm.estimateCost({ prompt_tokens: promptTokens, completion_tokens: completionTokens });
     for (const d of detail) d.costCny = Number((totalCost / detail.length).toFixed(6));
 
-    // eval 场景 usage 落库（难点 7：eval 场景意外升高=评估跑批没限流）
+    // 全跑完统一落 usage_records（scene=eval）——中途失败时 finally 兜底不再补，
+    // 逐 case 落库在 catch 中保证已消耗费用不丢失（#53）
     if (promptTokens > 0) {
       await this.prisma.usageRecord.create({
         data: {
@@ -163,7 +198,7 @@ export class EvalService {
       });
     }
 
-    return this.prisma.evalRun.create({
+    const run = await this.prisma.evalRun.create({
       data: {
         datasetVersion,
         triggeredBy,
@@ -177,6 +212,7 @@ export class EvalService {
         detail: detail as unknown as Prisma.InputJsonValue,
       },
     });
+    return run;
   }
 
   private async resolveGold(markers: string[], goldChunkIds: string[], cache: Map<string, GoldRef[]>): Promise<GoldRef[]> {

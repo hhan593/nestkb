@@ -432,6 +432,12 @@ button { font-family: inherit; }
 .md-answer th { background: var(--panel); font-weight: 600; }
 .md-answer table + table { margin-top: 6px; }
 
+/* 引用卡定位高亮（点击 [n] 上标滚动定位后的反馈） */
+.citation-card.cite-flash {
+  border-color: var(--cinnabar);
+  box-shadow: 0 0 0 3px var(--cinnabar-soft);
+}
+
 /* 反馈浮层 */
 .fb-pop {
   position: fixed; z-index: 50;

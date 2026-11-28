@@ -76,13 +76,15 @@ export default function Login() {
             {busy ? '登录中…' : '登录'}
           </button>
         </form>
-        <div className="login-hint">
-          种子账号（pnpm seed 生成，密码 <code>Passw0rd!123</code>）：
-          <br />
-          <code>alice@a-dept.com</code> 研发部成员 · <code>admin@nestkb.local</code> 管理员
-          <br />
-          <code>bob@b-dept.com</code> / <code>carol@b-dept.com</code> 人事部成员
-        </div>
+        {import.meta.env.DEV && (
+          <div className="login-hint">
+            种子账号（pnpm seed 生成，密码 <code>Passw0rd!123</code>）：
+            <br />
+            <code>alice@a-dept.com</code> 研发部成员 · <code>admin@nestkb.local</code> 管理员
+            <br />
+            <code>bob@b-dept.com</code> / <code>carol@b-dept.com</code> 人事部成员
+          </div>
+        )}
       </div>
     </div>
   );

@@ -14,8 +14,8 @@ installGlobalErrorHandlers();
 const root = ReactDOM.createRoot(document.getElementById('root')!);
 root.render(
   <React.StrictMode>
-    {/* 后端在根路径托管 SPA（web-ui.controller.ts），路由不加 basename，避免 401 跳转 /login 落到路由器之外 */}
-    <BrowserRouter>
+    {/* 后端在根路径托管 SPA 且 /kb/* 兜底返回 index.html（web-ui.controller.ts），客户端路由挂 /kb 前缀避让 API 路径空间 */}
+    <BrowserRouter basename="/kb">
       <AuthProvider>
         <ErrorBoundary>
           <App />

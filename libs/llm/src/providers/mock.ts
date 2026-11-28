@@ -190,8 +190,6 @@ export class MockRerankProvider implements RerankProvider {
 
   async rerank(query: string, documents: string[], topN: number): Promise<Array<{ index: number; score: number }>> {
     void this.env;
-    // 故障注入开关（E2E T08 降级演练用）：设 LLM_RERANK_FAIL=1 后每次调用抛错 → HybridRetrieval 降级 RRF
-    if (process.env.LLM_RERANK_FAIL === '1') throw new LlmUpstreamError('mock rerank: injected failure', false);
     if (query.length === 0) throw new LlmUpstreamError('mock rerank: empty query', false);
     return documents
       .map((d, index) => ({ index, score: Number(coverage(query, d).toFixed(4)) }))

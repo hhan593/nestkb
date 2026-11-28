@@ -80,8 +80,17 @@ export default function Documents() {
   const markExpired = useCallback(async (doc: DocumentRow) => {
     const input = window.prompt('标记为过期的时间（过期后不可被检索引用）：', new Date(Date.now() + 86400_000).toISOString().slice(0, 16));
     if (!input) return;
-    const iso = new Date(input).toISOString();
-    await api(`/admin/documents/${doc.id}/expire`, { body: { expiresAt: iso } });
+    const parsed = new Date(input);
+    if (Number.isNaN(parsed.getTime())) {
+      setPageError('时间格式不合法，请重新输入');
+      return;
+    }
+    try {
+      await api(`/admin/documents/${doc.id}/expire`, { body: { expiresAt: parsed.toISOString() } });
+      setPageError(null);
+    } catch (err) {
+      setPageError(err instanceof Error ? err.message : '标记过期失败');
+    }
     void load();
   }, [load]);
 

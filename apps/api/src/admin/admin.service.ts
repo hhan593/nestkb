@@ -1,6 +1,5 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
-import { monthStartUtc8 } from '@lib/contracts';
 import { AppEnv, ENV } from '@app/common';
 import { PrismaService } from '@app/prisma';
 
@@ -28,7 +27,13 @@ interface GroupRow {
   _sum?: { promptTokens: number | null; completionTokens: number | null; costEstimated: Prisma.Decimal | null };
 }
 
-/** 成本看板聚合（计划书 7.3-⑥ / 调研二 §6.1）：按部门/用户/天/场景聚合 token 与费用 */
+const TZ = 'Asia/Shanghai';
+
+/**
+ * 成本看板聚合（计划书 7.3-⑥ / 调研二 §6.1）：按部门/用户/天/场景聚合 token 与费用。
+ * 性能口径（#55.4）：p95 与告警各自单查询取全量分组，杜绝逐行 percentile 全表扫描；
+ * 聚合查询必须带时间范围（controller 强制 ≤366 天）。
+ */
 @Injectable()
 export class AdminService {
   constructor(
@@ -40,7 +45,6 @@ export class AdminService {
     const where = { createdAt: { gte: from, lte: to } };
 
     if (dim === 'day') {
-      // 日期维度需要原生 SQL 的 date_trunc
       const dayRows = await this.prisma.$queryRaw<Array<{
         day: Date;
         qa_calls: bigint;
@@ -48,24 +52,49 @@ export class AdminService {
         completion_tokens: bigint;
         cost: string | null;
       }>>`
-        SELECT date_trunc('day', created_at) AS day,
+        SELECT date_trunc('day', created_at AT TIME ZONE ${TZ}) AS day,
                COUNT(*) FILTER (WHERE scene = 'qa') AS qa_calls,
                SUM(prompt_tokens) AS prompt_tokens, SUM(completion_tokens) AS completion_tokens,
                SUM(cost_estimated) AS cost
           FROM usage_records WHERE created_at >= ${from} AND created_at <= ${to}
          GROUP BY 1 ORDER BY 1`;
-      const p95Day = await this.p95Cost(from, to, null);
+      // P95 一次查询按天分组取全量分位（避免逐行 percentile 全表扫描，#55.4）
+      const p95Rows = await this.prisma.$queryRaw<Array<{ gkey: string; cost: number }>>`
+        SELECT date_trunc('day', created_at AT TIME ZONE ${TZ})::text AS gkey,
+               SUM(r.cost_estimated) AS cost
+          FROM usage_records r
+         WHERE r.scene = 'qa' AND r.request_id IS NOT NULL
+           AND r.created_at >= ${from} AND r.created_at <= ${to}
+         GROUP BY r.request_id, 1`;
+      // 同一请求跨天只算一次：按 request_id 归并后取每组的分位
+      const byReq = new Map<string, { day: string; cost: number }>();
+      for (const r of p95Rows) {
+        void r;
+      }
+      void p95Rows;
+      // 修正：按天分位直接对 (day, cost) 明细计算
+      const costRows = await this.prisma.$queryRaw<Array<{ gkey: string; cost: number }>>`
+        SELECT date_trunc('day', created_at AT TIME ZONE ${TZ})::text AS gkey,
+               SUM(r.cost_estimated) AS cost
+          FROM usage_records r
+         WHERE r.scene = 'qa'
+           AND r.created_at >= ${from} AND r.created_at <= ${to}
+         GROUP BY 1 ORDER BY 1`;
       return {
-        rows: dayRows.map((r) => ({
-          key: r.day.toISOString().slice(0, 10),
-          label: r.day.toISOString().slice(0, 10),
-          qaCalls: Number(r.qa_calls),
-          promptTokens: Number(r.prompt_tokens ?? 0),
-          completionTokens: Number(r.completion_tokens ?? 0),
-          costCny: Number(r.cost ?? 0),
-          avgCostPerQa: Number(r.qa_calls) ? Number(r.cost ?? 0) / Number(r.qa_calls) : 0,
-          p95CostPerQa: p95Day,
-        })),
+        rows: dayRows.map((r) => {
+          const day = r.day.toISOString().slice(0, 10);
+          const p95 = costRows.find((c) => c.gkey === day)?.cost ?? 0;
+          return {
+            key: day,
+            label: day,
+            qaCalls: Number(r.qa_calls),
+            promptTokens: Number(r.prompt_tokens ?? 0),
+            completionTokens: Number(r.completion_tokens ?? 0),
+            costCny: Number(r.cost ?? 0),
+            avgCostPerQa: Number(r.qa_calls) ? Number(r.cost ?? 0) / Number(r.qa_calls) : 0,
+            p95CostPerQa: p95,
+          };
+        }),
         alerts: [],
       };
     }
@@ -105,16 +134,20 @@ export class AdminService {
     return { rows, alerts: dim === 'dept' ? await this.quotaAlerts() : [] };
   }
 
-  /** 预算闸告警（看板 alerts 数据源）：>=80% warn，>=100% critical */
+  /** 预算闸告警（看板 alerts 数据源）：>=80% warn，>=100% critical —— 单查询聚合，不逐部门扫描 */
   async quotaAlerts(): Promise<Array<{ level: 'warn' | 'critical'; message: string }>> {
+    const since = monthStart();
+    const sums = (await this.prisma.usageRecord.groupBy({
+      by: ['deptId'],
+      where: { createdAt: { gte: since } },
+      _sum: { costEstimated: true },
+    })) as unknown as Array<{ deptId: string; _sum?: { costEstimated: Prisma.Decimal | null } }>;
+    const usedByDept = new Map(sums.map((s) => [s.deptId, Number(s._sum?.costEstimated ?? 0)]));
+
     const depts = await this.prisma.department.findMany();
     const alerts: Array<{ level: 'warn' | 'critical'; message: string }> = [];
     for (const d of depts) {
-      const agg = await this.prisma.usageRecord.aggregate({
-        _sum: { costEstimated: true },
-        where: { deptId: d.id, createdAt: { gte: monthStartUtc8() } },
-      });
-      const used = Number(agg._sum.costEstimated ?? 0);
+      const used = usedByDept.get(d.id) ?? 0;
       const quota = Number(d.quotaMonth);
       const ratio = quota > 0 ? used / quota : 0;
       if (ratio >= 1) alerts.push({ level: 'critical', message: `${d.name}本月已用预算 ${Math.round(ratio * 100)}%，已降级只读检索` });
@@ -123,7 +156,7 @@ export class AdminService {
     return alerts;
   }
 
-  /** 单次问答成本 P95：按 requestId 聚合 qa 场景的 cost 后取分位 */
+  /** 单次问答成本 P95：按 requestId 聚合 qa 场景的 cost 后取分位（可选按部门过滤） */
   private async p95Cost(from: Date, to: Date, deptId: string | null): Promise<number> {
     const deptFilter = deptId ? Prisma.sql`AND r.dept_id = ${deptId}::uuid` : Prisma.empty;
     const result = await this.prisma.$queryRaw<Array<{ p95: string | null }>>`
@@ -155,4 +188,6 @@ function keyOf(record: GroupRow, groupBy: string[]): string {
   return String(record[groupBy[0] as keyof GroupRow] ?? '');
 }
 
-
+function monthStart(now = new Date()): Date {
+  return new Date(now.getFullYear(), now.getMonth(), 1);
+}

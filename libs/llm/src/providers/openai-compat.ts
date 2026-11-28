@@ -48,7 +48,9 @@ export class OpenAICompatChatProvider implements LlmChatProvider {
     let idleTimer: ReturnType<typeof setTimeout> | null = null;
     const armIdle = (): void => {
       if (idleTimer) clearTimeout(idleTimer);
-      idleTimer = setTimeout(() => controller.abort(), idleMs);
+      // abort 带上可识别的 reason：上游挂起要归类为「可重试的上游故障」，
+      // 而不是与用户主动断开（AbortError）混为一谈（#52）
+      idleTimer = setTimeout(() => controller.abort(new LlmUpstreamError(`chat stream idle > ${idleMs}ms`, true)), idleMs);
     };
 
     try {
@@ -116,8 +118,9 @@ export class OpenAICompatChatProvider implements LlmChatProvider {
       return { content, usage };
     } catch (err) {
       if (opts.signal?.aborted) throw err; // 客户端断开：原样上抛
-      if (controller.signal.aborted && !controller.signal.reason) {
-        throw new LlmUpstreamError(`chat stream idle > ${idleMs}ms`, true);
+      // 空闲超时：abort 的 reason 就是 LlmUpstreamError（带 retryable 标记），上抛供上游归类
+      if (controller.signal.aborted && controller.signal.reason instanceof LlmUpstreamError) {
+        throw controller.signal.reason;
       }
       throw err;
     } finally {

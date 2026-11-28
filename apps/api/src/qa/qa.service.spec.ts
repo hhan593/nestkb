@@ -31,7 +31,7 @@ function makeService(overrides: { queryLogWrite?: () => Promise<void> } = {}) {
     },
   };
   const metering = {
-    preDeduct: vi.fn(async () => undefined),
+    preDeduct: vi.fn(async () => 'reservation-token'),
     release: vi.fn(async () => undefined),
     settle: vi.fn(async () => ({ cost: 0.001, usageId: 'usage-1' })),
     settlePartial: vi.fn(async () => ({ cost: 0.001, usageId: 'usage-2' })),
@@ -90,7 +90,8 @@ describe('QaService.ask —— 预扣键生命周期（#23）', () => {
     expect(metering.preDeduct).toHaveBeenCalledTimes(1);
     expect(queryLog.write).toHaveBeenCalledTimes(1);
     expect(metering.release).toHaveBeenCalledTimes(1);
-    expect(metering.release).toHaveBeenCalledWith(user.userId);
+    // 释放携带预扣返回的预留令牌：值比对后才 DEL，防 TTL 过期误删（#51）
+    expect(metering.release).toHaveBeenCalledWith(user.userId, 'reservation-token');
   });
 
   it('正常结算后不再重复释放（避免误删下一次请求的预留键）', async () => {

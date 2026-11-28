@@ -1,5 +1,6 @@
+import { randomUUID } from 'node:crypto';
 import { Inject, Injectable } from '@nestjs/common';
-import { ErrorCodes, TokenUsage, estimateTokens, monthStartUtc8 } from '@lib/contracts';
+import { TokenUsage, estimateTokens, monthStartUtc8 } from '@lib/contracts';
 import { AppEnv, ENV, QuotaExceededException, RateLimitedException, REDIS } from '@app/common';
 import type Redis from 'ioredis';
 import { PRICE_TABLE, PriceTable } from '@lib/llm';
@@ -16,6 +17,8 @@ export interface SettleParams {
   model: string;
   usage: TokenUsage;
   requestId?: string;
+  /** 预扣预留令牌：结算/释放时值比对后才允许 DEL，防止 TTL 过期后误删下一笔的预留（#51） */
+  reservationToken?: string;
 }
 
 /**
@@ -31,15 +34,21 @@ export class MeteringService {
     @Inject(PRICE_TABLE) private readonly prices: PriceTable,
   ) {}
 
-  /** 预扣：部门月配额闸 + 用户级并发预留（上一笔未结算则拒绝） */
-  async preDeduct(userId: string, deptId: string, estPromptTokens: number): Promise<void> {
+  /**
+   * 预扣：部门月配额闸 + 用户级并发预留（上一笔未结算则拒绝）。
+   * 返回预留令牌——预留键的 VALUE 就是它；释放时必须值比对（Lua 原子删），
+   * 否则预留 TTL(300s) 过期后，旧请求的 release 会误删下一笔的预留键（#51）。
+   */
+  async preDeduct(userId: string, deptId: string, estPromptTokens: number): Promise<string> {
     const dept = await this.prisma.department.findUniqueOrThrow({ where: { id: deptId } });
     const used = await this.monthUsedCny(deptId);
     if (Number(dept.quotaMonth) <= used) {
       throw new QuotaExceededException(deptId, used, Number(dept.quotaMonth));
     }
-    const ok = await this.redis.set(`quota:res:${userId}`, String(estPromptTokens), 'EX', RESERVATION_TTL_SEC, 'NX');
+    const token = randomUUID();
+    const ok = await this.redis.set(`quota:res:${userId}`, token, 'EX', RESERVATION_TTL_SEC, 'NX');
     if (!ok) throw new RateLimitedException('上一笔问答尚未结算，请稍候');
+    return token;
   }
 
   /** 结算：usage_records 落库 + 预扣键回冲。返回成本（元）与记录 id */
@@ -66,7 +75,7 @@ export class MeteringService {
       return { cost, usageId: record.id };
     } finally {
       // 结算即释放预扣键：落库失败也要释放，否则调用方只能靠超时（TTL 300s）解锁
-      await this.release(p.userId).catch(() => undefined);
+      await this.release(p.userId, p.reservationToken).catch(() => undefined);
     }
   }
 
@@ -81,9 +90,17 @@ export class MeteringService {
     return this.settle({ ...p, usage });
   }
 
-  /** 早期退出（配额不足等）直接释放预扣键 */
-  async release(userId: string): Promise<void> {
-    await this.redis.del(`quota:res:${userId}`);
+  /**
+   * 释放预扣键：携带预留令牌时走 Lua「值比对匹配才 DEL」（原子，防跨请求误删）；
+   * 无令牌（兼容旧调用/兜底路径）退化为直接 DEL。
+   */
+  async release(userId: string, reservationToken?: string): Promise<void> {
+    if (!reservationToken) {
+      await this.redis.del(`quota:res:${userId}`);
+      return;
+    }
+    const script = `if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end`;
+    await this.redis.eval(script, 1, `quota:res:${userId}`, reservationToken);
   }
 
   /** 本月已用（元）= SUM(cost_estimated) WHERE created_at >= 本月 1 日 */
@@ -95,15 +112,4 @@ export class MeteringService {
     return Number(agg._sum.costEstimated ?? 0);
   }
 
-  get monthlyQuotaCny(): number {
-    return this.env.quota.monthlyCny;
-  }
-
-  quotaExceededError(used: number, quota: number): QuotaExceededException {
-    return new QuotaExceededException('', used, quota);
-  }
-
-  get errorCode(): typeof ErrorCodes {
-    return ErrorCodes;
-  }
 }

@@ -145,4 +145,3 @@ function parseAccessLevel(value?: string): AccessLevel {
   throw new BadRequestException({ code: ErrorCodes.VALIDATION_FAILED, message: `accessLevel 不合法：${value}` });
 }
 
-void UseGuards;

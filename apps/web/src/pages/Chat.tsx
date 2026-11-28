@@ -1,5 +1,5 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ArrowUp, MessageSquarePlus, Square, ThumbsDown, ThumbsUp, FileSearch, CircleAlert, X, Menu } from 'lucide-react';
+import { ArrowUp, Check, Copy, MessageSquarePlus, Square, ThumbsDown, ThumbsUp, FileSearch, CircleAlert, X, Menu } from 'lucide-react';
 import { api, apiStream } from '../lib/api';
 import { parseSseStream } from '../lib/sse';
 import { useAuth } from '../lib/auth';
@@ -121,7 +121,11 @@ export default function Chat() {
   }, []);
 
   useEffect(() => {
-    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight });
+    // stick-to-bottom：仅当用户本身在底部附近才跟随流式输出滚动，否则阅读上文会被强行拽回
+    const el = scrollRef.current;
+    if (!el) return;
+    const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
+    if (distance < 120) el.scrollTo({ top: el.scrollHeight });
   }, [messages]);
 
   const removeConv = useCallback(async (id: string) => {
@@ -158,9 +162,16 @@ export default function Chat() {
   }, [loadConvs]);
 
   /** override 供「重试」用：直接重放指定问题，而不是读输入框 */
+  // 同步防重入闸门：建会话的 await 期间 streaming 尚未置位，必须用 ref 在入口就挡住连击
+  const busyRef = useRef(false);
   const send = useCallback(async (override?: string) => {
+    if (busyRef.current) return;
+    busyRef.current = true;
     const question = (override ?? inputRef.current).trim();
-    if (!question || streamingRef.current) return;
+    if (!question || streamingRef.current) {
+      busyRef.current = false;
+      return;
+    }
     let convId = activeConv;
     try {
       if (!convId) {
@@ -173,6 +184,7 @@ export default function Chat() {
     } catch (err) {
       // 建会话失败：还原输入并提示，不让 Promise 链静默失败
       setPageError(err instanceof Error ? err.message : '创建会话失败，请重试');
+      busyRef.current = false;
       return;
     }
     setPageError(null);
@@ -242,6 +254,7 @@ export default function Chat() {
         abortRef.current = null;
         setStreaming(false);
       }
+      busyRef.current = false; // 释放入口闸门（本函数所有退出路径都经这里）
       void refreshMe(); // 配额变化
       void loadConvs(); // 会话标题更新
     }
@@ -390,9 +403,15 @@ export default function Chat() {
               rows={1}
               placeholder={me ? `问点什么，${me.email.split('@')[0]}…（Enter 发送，Shift+Enter 换行）` : ''}
               value={input}
-              onChange={(e) => setInput(e.target.value)}
+              onChange={(e) => {
+                setInput(e.target.value);
+                const el = e.target;
+                el.style.height = 'auto';
+                el.style.height = Math.min(el.scrollHeight, 140) + 'px';
+              }}
               onKeyDown={(e) => {
-                if (e.key === 'Enter' && !e.shiftKey) {
+                // IME 合成态（拼音候选确认）的 Enter 不代表发送
+                if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
                   e.preventDefault();
                   void send();
                 }
@@ -493,6 +512,7 @@ const MessageView = memo(function MessageView({
           {m.latencyMs ? <span>· {(m.latencyMs / 1000).toFixed(1)}s</span> : null}
           {m.status === 'aborted' && <span>· 已中断</span>}
           <span className="msg-actions">
+            <CopyAnswerButton text={m.content} />
             <button
               className={`icon-btn${fb === 'up' ? ' on' : ''}`}
               title="有帮助"
@@ -528,8 +548,23 @@ function AnswerText({ content, citations, streaming }: { content: string; citati
         <span
           key={key}
           className="ref-sup"
+          role="button"
+          tabIndex={0}
           title={`《${citations[n - 1].title}》 ${citations[n - 1].headingPath}`}
-          onClick={() => document.getElementById(`cite-${n}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' })}
+          onClick={() => {
+            const el = document.getElementById(`cite-${n}`);
+            el?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            if (el) {
+              el.classList.add('cite-flash');
+              setTimeout(() => el.classList.remove('cite-flash'), 1600);
+            }
+          }}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' || e.key === ' ') {
+              e.preventDefault();
+              (e.target as HTMLElement).click?.();
+            }
+          }}
         >
           {n}
         </span>
