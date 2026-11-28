@@ -82,14 +82,14 @@ export default function Documents() {
     if (!input) return;
     const parsed = new Date(input);
     if (Number.isNaN(parsed.getTime())) {
-      setPageError('时间格式不合法，请重新输入');
+      setError('时间格式不合法，请重新输入');
       return;
     }
     try {
       await api(`/admin/documents/${doc.id}/expire`, { body: { expiresAt: parsed.toISOString() } });
-      setPageError(null);
+      setError(null);
     } catch (err) {
-      setPageError(err instanceof Error ? err.message : '标记过期失败');
+      setError(err instanceof Error ? err.message : '标记过期失败');
     }
     void load();
   }, [load]);

@@ -92,20 +92,11 @@ export default function Usage() {
           </div>
         ))}
 
-        {loading && <div className="spinner" style={{ margin: '40px auto' }} />}
         {error && <div className="alert-banner alert-critical"><CircleAlert /> {error}</div>}
-
-        {!loading && !error && data === null ? (
-          <div className="empty">暂无数据</div>
-        ) : null}
-
-        {!loading && !error && data && data.rows.length === 0 ? (
-          <div className="card card-pad empty">所选时间范围内没有 usage 记录</div>
-        ) : null}
 
         {loading ? (
           <div className="spinner" style={{ margin: '60px auto' }} />
-        ) : data.rows.length === 0 ? (
+        ) : data === null || data.rows.length === 0 ? (
           <div className="card card-pad empty">所选时间范围内没有 usage 记录</div>
         ) : (
           <div className="card" style={{ overflow: 'hidden' }}>
@@ -136,7 +127,7 @@ export default function Usage() {
               </tbody>
             </table>
           </div>
-        ) : null}
+        )}
       </div>
     </div>
   );
