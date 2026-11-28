@@ -32,10 +32,13 @@ export default function RetrievalDebug() {
   const [result, setResult] = useState<DebugResult | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // out-of-order 防护：连续点搜索时，只有最后一次请求的结果允许写入
+  const seqRef = useRef(0);
 
   const run = async () => {
     const query = q.trim();
     if (!query) return;
+    const seq = ++seqRef.current;
     setBusy(true);
     setError(null);
     try {

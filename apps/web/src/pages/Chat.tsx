@@ -624,15 +624,38 @@ function AnswerText({ content, citations, streaming }: { content: string; citati
   );
 }
 
+/** 复制整段回答：点击后短暂打勾确认（剪贴板不可用时静默失败） */
+function CopyAnswerButton({ text }: { text: string }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <button
+      className={`icon-btn${copied ? ' on' : ''}`}
+      title="复制回答"
+      aria-label="复制回答"
+      onClick={async () => {
+        try {
+          await navigator.clipboard.writeText(text);
+          setCopied(true);
+          setTimeout(() => setCopied(false), 1500);
+        } catch {
+          /* 非安全上下文或权限被拒：不弹错，保持安静 */
+        }
+      }}
+    >
+      {copied ? <Check /> : <Copy />}
+    </button>
+  );
+}
+
 function CitationList({ citations }: { citations: CitationDto[] }) {
   return (
     <div className="citations">
       {citations.map((c) => (
         <div key={c.no} className="citation-card" id={`cite-${c.no}`}>
+          <span className="citation-stamp" title={`引用版本 v${c.versionNo}`}>v{c.versionNo}</span>
           <div className="citation-head">
             <span className="citation-no">{c.no}</span>
             <span className="citation-title">《{c.title}》</span>
-            <span style={{ fontSize: 11, color: 'var(--ink-3)' }}>v{c.versionNo}</span>
             {c.possiblyOutdated && <span className="badge badge-warn outdated-tag">可能已过期</span>}
             {c.effectiveAt && <span style={{ marginLeft: 'auto', fontSize: 11, color: 'var(--ink-3)' }}>生效 {c.effectiveAt.slice(0, 10)}</span>}
           </div>
