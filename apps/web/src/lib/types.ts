@@ -8,6 +8,8 @@ export interface CitationDto {
   versionNo: number;
   headingPath: string;
   quote: string;
+  /** chunk 完整原文（>200 字时携带；历史会话快照无此字段） */
+  fullContent?: string;
   effectiveAt: string | null;
   possiblyOutdated: boolean;
 }
@@ -145,6 +147,19 @@ export function fmtDate(iso: string | null | undefined): string {
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return '—';
   return d.toLocaleDateString('zh-CN');
+}
+
+/** 相对时间（#59-4 会话列表时间戳）：刚刚 / N 分钟前 / N 小时前 / N 天前，超过 7 天落回日期 */
+export function fmtRelTime(iso: string | null | undefined): string {
+  if (!iso) return '';
+  const t = new Date(iso).getTime();
+  if (Number.isNaN(t)) return '';
+  const diff = Date.now() - t;
+  if (diff < 60_000) return '刚刚';
+  if (diff < 3_600_000) return `${Math.floor(diff / 60_000)} 分钟前`;
+  if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)} 小时前`;
+  if (diff < 7 * 86_400_000) return `${Math.floor(diff / 86_400_000)} 天前`;
+  return fmtDate(iso);
 }
 
 export function fmtTime(iso: string | null | undefined): string {

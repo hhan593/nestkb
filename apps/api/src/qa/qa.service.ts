@@ -1,4 +1,4 @@
-import { Inject, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import {
   CitationDto,
@@ -88,6 +88,16 @@ export class QaService {
     const conv = await this.prisma.conversation.findFirst({ where: { id, userId: user.userId } });
     if (!conv) throw new NotFoundException('会话不存在');
     await this.prisma.conversation.delete({ where: { id } }); // messages 级联
+  }
+
+  /** 重命名会话（标题缺省时回落为首问前 30 字，允许显式改回任意非空标题） */
+  async renameConversation(user: AuthedUser, id: string, title: string): Promise<{ id: string; title: string }> {
+    const trimmed = title.trim().slice(0, 60);
+    if (!trimmed) throw new BadRequestException('标题不能为空');
+    const conv = await this.prisma.conversation.findFirst({ where: { id, userId: user.userId } });
+    if (!conv) throw new NotFoundException('会话不存在');
+    const updated = await this.prisma.conversation.update({ where: { id }, data: { title: trimmed } });
+    return { id: updated.id, title: updated.title ?? trimmed };
   }
 
   async getConversation(user: AuthedUser, id: string) {

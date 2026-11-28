@@ -14,6 +14,7 @@ export function mapCitation(no: number, chunk: RetrievedChunk): CitationDto {
     versionNo: chunk.versionNo,
     headingPath: chunk.headingPath,
     quote: chunk.content.slice(0, 200),
+    fullContent: chunk.content.length > 200 ? chunk.content : undefined,
     effectiveAt: chunk.effectiveAt,
     possiblyOutdated: expiredSoon,
   };

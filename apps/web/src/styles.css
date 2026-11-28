@@ -164,6 +164,8 @@ button { font-family: inherit; }
 .btn svg { width: 15px; height: 15px; }
 .btn-primary { background: var(--cinnabar); color: #f7f2e6; }
 .btn-primary:hover:not(:disabled) { background: var(--cinnabar-hover); }
+.btn-danger { background: var(--err); color: #f7f2e6; }
+.btn-danger:hover:not(:disabled) { background: var(--cinnabar-hover); }
 .btn-secondary { background: var(--surface); color: var(--ink); border-color: var(--line-strong); }
 .btn-secondary:hover:not(:disabled) { border-color: var(--ink-3); }
 .btn-ghost { background: none; color: var(--ink-2); }
@@ -245,6 +247,20 @@ button { font-family: inherit; }
 .table tbody tr:last-child td { border-bottom: none; }
 .table tbody tr:hover { background: rgba(236, 230, 213, 0.5); }
 .num { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+/* 可排序列头（#59-7 文档列表排序） */
+.th-sort { border: none; background: none; cursor: pointer; padding: 0; font: inherit; color: inherit; letter-spacing: inherit; display: inline-flex; align-items: center; gap: 3px; }
+.th-sort:hover { color: var(--ink); }
+.th-sort .arrow { font-size: 9px; color: var(--cinnabar); }
+/* 成本看板折线图（#59-8）：SVG 无依赖手绘 */
+.cost-chart { margin-bottom: 16px; }
+.cost-chart svg { display: block; width: 100%; height: 180px; }
+.cost-chart-line { fill: none; stroke: var(--cinnabar); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+.cost-chart-area { fill: var(--cinnabar-soft); stroke: none; }
+.cost-chart-grid { stroke: var(--line); stroke-width: 1; }
+.cost-chart-dot { fill: var(--surface); stroke: var(--cinnabar); stroke-width: 1.5; }
+.cost-chart-label { font-size: 10px; fill: var(--ink-3); font-family: var(--font-mono); }
+.cost-chart-legend { display: flex; gap: 14px; font-size: var(--fs-xs); color: var(--ink-2); margin-top: 6px; }
+.cost-chart-legend .swatch { display: inline-block; width: 14px; height: 3px; border-radius: 2px; background: var(--cinnabar); vertical-align: middle; margin-right: 5px; }
 
 /* ── 登录页 ─────────────────────────── */
 .login-wrap {
@@ -302,7 +318,17 @@ button { font-family: inherit; }
 .conv-item:hover { color: var(--ink); }
 .conv-item.active { color: var(--ink); font-weight: 600; }
 .conv-del { flex: none; opacity: 0; margin-right: 4px; }
-.conv-item-row:hover .conv-del { opacity: 1; }
+.conv-item-row:hover .conv-del, .conv-item-row:hover .conv-rename-btn { opacity: 1; }
+.conv-time { flex: none; font-size: 10px; color: var(--ink-3); opacity: 0; margin-right: 2px; white-space: nowrap; }
+.conv-item-row:hover .conv-time, .conv-item-row.active .conv-time { opacity: 1; }
+.conv-rename-btn { flex: none; opacity: 0; margin-right: 2px; }
+.conv-rename-input {
+  flex: 1; min-width: 0;
+  border: 1px solid var(--cinnabar); border-radius: 3px;
+  background: var(--surface); color: var(--ink);
+  font-family: inherit; font-size: var(--fs-sm);
+  padding: 5px 8px; outline: none;
+}
 
 .chat-main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 .chat-scroll { flex: 1; overflow-y: auto; padding: 26px 34px; }
@@ -443,6 +469,13 @@ button { font-family: inherit; }
 }
 .citation-quote th { background: var(--panel); }
 .citation-quote .rowsep { display: none; }
+.citation-quote.expanded { display: block; }
+.citation-more {
+  border: none; background: none; cursor: pointer;
+  font-size: var(--fs-xs); font-weight: 550; color: var(--indigo);
+  padding: 2px 0; margin-top: 3px;
+}
+.citation-more:hover { text-decoration: underline; }
 .outdated-tag { color: var(--warn); font-weight: 600; }
 .citation-stamp {
   position: absolute; right: 10px; top: 8px;
@@ -525,6 +558,23 @@ button { font-family: inherit; }
 .dialog-title { font-size: var(--fs-xl); font-weight: 700; letter-spacing: 0.02em; margin-bottom: 18px; }
 .dialog-form { display: grid; gap: 14px; }
 .dialog-foot { display: flex; justify-content: flex-end; gap: 10px; margin-top: 20px; }
+.dialog-message { font-size: var(--fs-md); color: var(--ink-2); line-height: 1.7; margin-bottom: 6px; }
+.dialog-warning {
+  display: flex; align-items: center; gap: 8px;
+  background: var(--warn-soft); color: var(--warn);
+  border: 1px solid currentColor; border-radius: var(--r-sm);
+  font-size: var(--fs-sm); padding: 8px 12px; margin: 10px 0 4px;
+}
+.dialog-anim { animation: dialog-pop 200ms ease-out; }
+@keyframes dialog-pop {
+  from { opacity: 0; transform: translateY(6px) scale(0.97); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+.overlay { animation: overlay-fade 200ms ease-out; }
+@keyframes overlay-fade {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
 
 /* 版本时间线 */
 .version-item { display: flex; gap: 12px; padding: 12px 0; border-bottom: 1px dashed var(--line-strong); }
@@ -545,6 +595,14 @@ button { font-family: inherit; }
 .alert-warn { background: var(--warn-soft); color: var(--warn); }
 .alert-critical { background: var(--err-soft); color: var(--err); font-weight: 550; }
 .alert-banner svg { width: 15px; height: 15px; flex: none; }
+/* 横幅内操作（#59-11 常驻 + 重试）：与横幅同色系反白 */
+.alert-actions { margin-left: auto; display: flex; gap: 6px; flex: none; }
+.btn-retry {
+  border: 1px solid currentColor; background: transparent; color: inherit;
+  border-radius: 3px; padding: 2px 10px; font-size: var(--fs-xs); font-weight: 550;
+  cursor: pointer; font-family: inherit;
+}
+.btn-retry:hover { background: rgba(247, 242, 230, 0.22); }
 
 /* 检索调试：三路对比 */
 .debug-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }

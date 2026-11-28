@@ -9,10 +9,12 @@ export const GLOBAL_ERROR_EVENT = 'nestkb:global-error';
 
 export interface GlobalErrorDetail {
   message: string;
+  /** 已知失败动作时提供重试入口（#59-11），横幅点击"重试"后再次执行 */
+  retry?: () => void;
 }
 
-export function notifyGlobalError(message: string): void {
-  window.dispatchEvent(new CustomEvent<GlobalErrorDetail>(GLOBAL_ERROR_EVENT, { detail: { message } }));
+export function notifyGlobalError(message: string, retry?: () => void): void {
+  window.dispatchEvent(new CustomEvent<GlobalErrorDetail>(GLOBAL_ERROR_EVENT, { detail: { message, retry } }));
 }
 
 function isAbort(err: unknown): boolean {
