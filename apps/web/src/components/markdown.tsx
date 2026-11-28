@@ -94,9 +94,13 @@ export function parseBlocks(md: string): Block[] {
 /** 行内渲染：**粗体** / *斜体* / `代码` / [n] 引用 */
 export function renderInline(text: string, refs?: RenderRefs, keyBase = 'i'): ReactNode[] {
   const out: ReactNode[] = [];
-  // 先按引用编号切分，再在各段内做粗体/斜体/行内代码
-  const parts = text.split(/(\[\d{1,2}\])/g);
+  // 行内代码必须最先切分保护：否则 `arr[1]` 里的 [1] 会被当成引用上标拆坏
+  const parts = text.split(/(`[^`]+`|\[\d{1,2}\]|\*\*[^*]+\*\*|\*[^*]+\*)/g);
   parts.forEach((part, pi) => {
+    if (/^`[^`]+`$/.test(part)) {
+      out.push(<code key={`${keyBase}-${pi}`} className="mono inline-code">{part.slice(1, -1)}</code>);
+      return;
+    }
     const ref = part.match(/^\[(\d{1,2})\]$/);
     if (ref) {
       const n = Number(ref[1]);
@@ -107,15 +111,15 @@ export function renderInline(text: string, refs?: RenderRefs, keyBase = 'i'): Re
       }
       return;
     }
-    // 粗体/斜体/行内代码
-    const segs = part.split(/(\*\*[^*]+\*\*|\*[^*]+\*|`[^`]+`)/g);
-    segs.forEach((seg, si) => {
-      const key = `${keyBase}-${pi}-${si}`;
-      if (/^\*\*[^*]+\*\*$/.test(seg)) out.push(<strong key={key}>{seg.slice(2, -2)}</strong>);
-      else if (/^\*[^*]+\*$/.test(seg)) out.push(<em key={key}>{seg.slice(1, -1)}</em>);
-      else if (/^`[^`]+`$/.test(seg)) out.push(<code key={key} className="mono inline-code">{seg.slice(1, -1)}</code>);
-      else if (seg) out.push(seg);
-    });
+    if (/^\*\*[^*]+\*\*$/.test(part)) {
+      out.push(<strong key={`${keyBase}-${pi}`}>{part.slice(2, -2)}</strong>);
+      return;
+    }
+    if (/^\*[^*]+\*$/.test(part)) {
+      out.push(<em key={`${keyBase}-${pi}`}>{part.slice(1, -1)}</em>);
+      return;
+    }
+    if (part) out.push(part);
   });
   return out;
 }

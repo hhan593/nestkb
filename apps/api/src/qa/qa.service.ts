@@ -171,8 +171,9 @@ export class QaService {
     // ── 预扣：两种模式都要过成本闸；chat 无资料块，预估只含问题 + 历史 + 预留输出
     const topK = opts.topK ?? this.env.retrieval.topKFinal;
     const estPromptTokens = estimateTokens(question.length + (mode === 'chat' ? 1500 : topK * 500));
+    let reservationToken: string;
     try {
-      await this.metering.preDeduct(user.userId, user.deptId, estPromptTokens);
+      reservationToken = await this.metering.preDeduct(user.userId, user.deptId, estPromptTokens);
     } catch (err) {
       const isQuota = err instanceof QuotaExceededException;
       sink.open({ messageId, requestId, retrieval: zeroMeta });
@@ -185,11 +186,11 @@ export class QaService {
 
     // 预扣成功后必须保证有出口释放：任何未走到结算的路径（检索/落库/摘要化抛错）都由这里的 finally 兜底。
     // 否则 Redis 预留键要等 TTL(300s) 才过期，期间该用户所有提问都会 429「上一笔问答尚未结算」。
-    const reservation = { active: true };
+    const reservation = { active: true, token: reservationToken };
     try {
       await this.runAnswer(opts, { conv, mode, messageId, zeroMeta, topK, estPromptTokens, t0, reservation });
     } finally {
-      if (reservation.active) await this.metering.release(user.userId).catch(() => undefined);
+      if (reservation.active) await this.metering.release(user.userId, reservation.token).catch(() => undefined);
     }
   }
 
@@ -204,7 +205,7 @@ export class QaService {
       topK: number;
       estPromptTokens: number;
       t0: number;
-      reservation: { active: boolean };
+      reservation: { active: boolean; token: string };
     },
   ): Promise<void> {
     const { user, question, sink, requestId } = opts;
@@ -213,7 +214,7 @@ export class QaService {
     const releaseReservation = async (): Promise<void> => {
       if (!reservation.active) return;
       reservation.active = false;
-      await this.metering.release(user.userId).catch(() => undefined);
+      await this.metering.release(user.userId, reservation.token).catch(() => undefined);
     };
 
     const scope: AccessScope = { userId: user.userId, deptId: user.deptId, isAdmin: user.role === 'admin' };
@@ -364,19 +365,13 @@ export class QaService {
         model: this.llm.model,
         usage: streamResult.usage,
         requestId,
+        reservationToken: reservation.token,
       });
       const latencyMs = Date.now() - t0;
-      await this.prisma.message.update({
-        where: { id: messageId },
-        data: {
-          content: answer,
-          citations: citations as unknown as Prisma.InputJsonValue,
-          retrievalSnapshot: snapshot as unknown as Prisma.InputJsonValue,
-          usageId: settle.usageId,
-          latencyMs,
-          status: 'completed',
-        },
-      });
+
+      // 先下发引用/计量/完成事件（答案流已投递完毕），再做持久化与缓存 —— 持久化失败
+      // 只记日志：不能走下方 catch 的 settlePartial（settle 已落库，会双重计费 #50），
+      // 也不能把已完成的回答改写为 failed
       sink.citations(citations);
       sink.usage({
         promptTokens: streamResult.usage.prompt_tokens,
@@ -386,9 +381,31 @@ export class QaService {
       });
       sink.done({ latencyMs });
 
-      if (!conv.title) await this.prisma.conversation.update({ where: { id: conv.id }, data: { title: question.slice(0, 30) } });
-      if (this.env.semanticCacheEnabled && citations.length) {
-        await this.cache.put(user.deptId, question, { answer, citations });
+      try {
+        await this.prisma.message.update({
+          where: { id: messageId },
+          data: {
+            content: answer,
+            citations: citations as unknown as Prisma.InputJsonValue,
+            retrievalSnapshot: snapshot as unknown as Prisma.InputJsonValue,
+            usageId: settle.usageId,
+            latencyMs,
+            status: 'completed',
+          },
+        });
+        // touch updatedAt：有标题的会话持续问答也要浮到列表顶部（#55.7）
+        await this.prisma.conversation.update({
+          where: { id: conv.id },
+          data: { ...(conv.title ? {} : { title: question.slice(0, 30) }), updatedAt: new Date() },
+        });
+        if (this.env.semanticCacheEnabled && citations.length) {
+          await this.cache.put(user.deptId, question, { answer, citations });
+        }
+      } catch (persistErr) {
+        this.logger.error('post-settle persistence failed (answer already delivered)', {
+          err: String(persistErr),
+          messageId,
+        });
       }
     } catch (err) {
       const aborted = opts.signal?.aborted || (err instanceof Error && err.name === 'AbortError');
@@ -414,8 +431,9 @@ export class QaService {
           promptTokensEstimate: estPromptTokens,
           completionChars: content.length,
           requestId,
+          reservationToken: reservation.token,
         })
-        .catch(() => this.metering.release(user.userId));
+        .catch(() => this.metering.release(user.userId, reservation.token));
       if (aborted) return; // 客户端已断开，无法下发
       this.logger.error('qa upstream failed', { err: String(err) });
       sink.error({ code: ErrorCodes.UPSTREAM_ERROR, message: '模型调用失败', retryable: true });
@@ -497,7 +515,8 @@ export class QaService {
     rows: Message[],
     user: AuthedUser,
   ): Promise<string> {
-    const transcript = rows.map((m) => `${m.role === 'user' ? '问' : '答'}：${m.content}`).join('\n').slice(0, 6000);
+    // slice(-6000) 保留【最近】的对话——超长会话中最近最关键的轮次不能被截掉（#55.6）
+    const transcript = rows.map((m) => `${m.role === 'user' ? '问' : '答'}：${m.content}`).join('\n').slice(-6000);
     const result = await this.llm.chat(
       [
         { role: 'system', content: '将企业知识库问答的对话历史压缩为不超过 200 字的要点摘要，保留关键数字、条款与结论。' },

@@ -134,8 +134,12 @@ export class DocumentsService {
         }
       });
     } catch (err) {
-      // 事务失败：回收已落盘文件，不留孤儿
+      // 事务失败：回收已落盘文件 + 新建路径回收 Document 行（否则留下无版本僵尸文档，
+      // 永久出现在列表里）；已有文档（新版本路径）不受影响
       await fs.rm(path.join(absDir, path.basename(storageKey)), { force: true }).catch(() => undefined);
+      if (!documentId) {
+        await this.prisma.document.delete({ where: { id: doc.id } }).catch(() => undefined);
+      }
       throw err;
     }
     versionNo = version.versionNo;
@@ -273,6 +277,13 @@ export class DocumentsService {
     if (!doc) throw new NotFoundException('文档不存在');
     await this.assertCanManage(user, doc);
     const versions = await this.prisma.documentVersion.findMany({ where: { documentId: id } });
+    // 摘除该文档全部版本的 BullMQ 任务：否则删除后排队中的摄取照常执行，
+    // setStage upsert 打在不存在的行上（FK 违规）重试 3 次后进 DLQ 噪音
+    await Promise.all(
+      versions.map((v) =>
+        this.ingestQueue.remove(v.id).catch(() => undefined),
+      ),
+    );
     // 先断开自引用（current_version_id → document_versions），否则级联删除时 FK 校验失败
     await this.prisma.document.update({ where: { id }, data: { currentVersionId: null } });
     await this.prisma.document.delete({ where: { id } });
@@ -322,31 +333,39 @@ export class DocumentsService {
     });
     const bullJob = await this.ingestQueue.getJob(versionId);
     const originalUploader = (bullJob?.data as IngestJobData | undefined)?.uploadedBy ?? versionId;
-    if (bullJob) {
-      try {
-        await bullJob.retry();
-        return { requeued: true };
-      } catch {
-        await this.ingestQueue.remove(versionId).catch(() => undefined);
+    // 重放入队失败要回滚 stage，否则行永久卡 queued 且无补偿（对照 createVersionFor 的入队补偿）
+    try {
+      if (bullJob) {
+        try {
+          await bullJob.retry();
+          return { requeued: true };
+        } catch {
+          await this.ingestQueue.remove(versionId).catch(() => undefined);
+        }
       }
+      await this.ingestQueue.add(
+        'ingest',
+        {
+          documentId: doc.id,
+          versionId,
+          title: doc.title,
+          storageKey: doc.currentVersion.storageKey,
+          mimeType: doc.currentVersion.mimeType,
+          contentHash: doc.currentVersion.checksum,
+          deptId: doc.departmentId,
+          aclDeptIds: await this.buildAclDeptIds(doc.accessLevel, doc.departmentId, doc.id),
+          uploadedBy: originalUploader,
+          requestId: this.trace.requestId,
+        } satisfies IngestJobData,
+        { jobId: versionId, attempts: 3, backoff: { type: 'exponential', delay: 5000 }, removeOnComplete: 500, removeOnFail: false },
+      );
+      return { requeued: true };
+    } catch (err) {
+      await this.prisma.ingestionJob
+        .update({ where: { versionId }, data: { stage: 'failed', error: `REINGEST_FAILED: ${String(err).slice(0, 400)}` } })
+        .catch(() => undefined);
+      throw err;
     }
-    await this.ingestQueue.add(
-      'ingest',
-      {
-        documentId: doc.id,
-        versionId,
-        title: doc.title,
-        storageKey: doc.currentVersion.storageKey,
-        mimeType: doc.currentVersion.mimeType,
-        contentHash: doc.currentVersion.checksum,
-        deptId: doc.departmentId,
-        aclDeptIds: await this.buildAclDeptIds(doc.accessLevel, doc.departmentId, doc.id),
-        uploadedBy: originalUploader,
-        requestId: this.trace.requestId,
-      } satisfies IngestJobData,
-      { jobId: versionId, attempts: 3, backoff: { type: 'exponential', delay: 5000 }, removeOnComplete: 500, removeOnFail: false },
-    );
-    return { requeued: true };
   }
 
   /**

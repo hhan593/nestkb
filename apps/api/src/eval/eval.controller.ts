@@ -1,5 +1,5 @@
 import { BadRequestException, Body, Controller, Get, Param, Post, Query } from '@nestjs/common';
-import { IsOptional, IsString, MaxLength } from 'class-validator';
+import { ArrayMaxSize, IsArray, IsBoolean, IsIn, IsOptional, IsString, Length, MaxLength, MinLength } from 'class-validator';
 import { Roles } from '../auth/guards/roles.guard';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import type { AuthedUser } from '../auth/auth.service';
@@ -17,6 +17,20 @@ class RunEvalDto {
   @IsString()
   @MaxLength(64)
   triggeredBy?: string;
+}
+
+/** 批量导入 DTO：显式校验规则必须声明，否则 whitelist:true 会把字段整体剥空（#33 / #55.10） */
+class ImportCaseInput {
+  @IsString() @Length(1, 500) question!: string;
+  @IsOptional() @IsIn(['fact', 'table', 'timeliness', 'deny', 'multi_hop']) caseType?: 'fact' | 'table' | 'timeliness' | 'deny' | 'multi_hop';
+  @IsOptional() @IsString() @MaxLength(2000) goldAnswer?: string | null;
+  @IsOptional() @IsArray() @ArrayMaxSize(10) @IsString({ each: true }) @Length(1, 200, { each: true }) goldMarkers?: string[];
+  @IsOptional() @IsBoolean() expectDeny?: boolean;
+  @IsOptional() @IsIn(['manual', 'feedback', 'incident']) source?: 'manual' | 'feedback' | 'incident';
+}
+
+class ImportCasesDto {
+  @IsArray() @ArrayMaxSize(500) cases!: ImportCaseInput[];
 }
 
 /** 评估回归触发（计划书 7.2-18 + P1）：pnpm eval / CI 调同一入口 */
@@ -42,14 +56,7 @@ export class EvalController {
 
   /** 点踩/失败专项批量导入评测集（source 可标注，防过拟合的三来源之一） */
   @Post('cases/import')
-  async importCases(@Body() dto: { cases: Array<{
-    question: string;
-    caseType?: 'fact' | 'table' | 'timeliness' | 'deny' | 'multi_hop';
-    goldAnswer?: string | null;
-    goldMarkers?: string[];
-    expectDeny?: boolean;
-    source?: 'manual' | 'feedback' | 'incident';
-  }> }) {
+  async importCases(@Body() dto: ImportCasesDto) {
     if (!Array.isArray(dto?.cases) || dto.cases.length === 0) throw new BadRequestException('cases 不能为空');
     const created = await this.prisma.$transaction(
       dto.cases.map((c) =>

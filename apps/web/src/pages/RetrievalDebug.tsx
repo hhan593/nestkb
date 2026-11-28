@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { CircleAlert, Search } from 'lucide-react';
 import { api } from '../lib/api';
 import { type DebugChunk, type DebugResult } from '../lib/types';
@@ -40,11 +40,14 @@ export default function RetrievalDebug() {
     setError(null);
     try {
       const path = `/admin/retrieval/debug?q=${encodeURIComponent(query)}${deptId.trim() ? `&deptId=${deptId.trim()}` : ''}`;
-      setResult(await api<DebugResult>(path));
+      const result = await api<DebugResult>(path);
+      if (seq !== seqRef.current) return;
+      setResult(result);
     } catch (err) {
+      if (seq !== seqRef.current) return;
       setError(err instanceof Error ? err.message : '调试请求失败');
     } finally {
-      setBusy(false);
+      if (seq === seqRef.current) setBusy(false);
     }
   };
 

@@ -1,5 +1,6 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { AppEnv, ENV } from '@app/common';
+import { LlmUpstreamError } from './providers/openai-compat';
 import { PriceTable } from './price-table';
 import { RERANK_PROVIDER, PRICE_TABLE } from './tokens';
 import type { RerankProvider } from './provider-types';
@@ -21,6 +22,11 @@ export class RerankService {
   }
 
   async rerank(query: string, documents: string[], topN: number): Promise<Array<{ index: number; score: number }>> {
+    // 故障注入开关（E2E T08 降级演练用，对所有 provider 生效）：
+    // 设 LLM_RERANK_FAIL=1 后每次调用抛错 → HybridRetrieval 降级 RRF
+    if (process.env.LLM_RERANK_FAIL === '1') {
+      throw new LlmUpstreamError('rerank: injected failure (LLM_RERANK_FAIL=1)', false);
+    }
     const controller = new AbortController();
     const killer = setTimeout(() => controller.abort(), this.env.rerank.timeoutMs);
     try {

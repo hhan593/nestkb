@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { CircleAlert } from 'lucide-react';
 import { api } from '../lib/api';
 import { fmtCost, fmtNum, type UsageSummary } from '../lib/types';
@@ -34,14 +34,24 @@ export default function Usage() {
   const [fromDate, setFromDate] = useState(from);
   const [toDate, setToDate] = useState(to);
   const [data, setData] = useState<UsageSummary | null>(null);
+  const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // out-of-order 防护：快速切换筛选时，只有最后一次请求的结果允许写入
+  const seqRef = useRef(0);
 
   const load = useCallback(async () => {
+    const seq = ++seqRef.current;
     setError(null);
+    setLoading(true);
     try {
-      setData(await api<UsageSummary>(`/admin/usage/summary?dim=${dim}&from=${fromDate}T00:00:00Z&to=${toDate}T23:59:59Z`));
+      const d = await api<UsageSummary>(`/admin/usage/summary?dim=${dim}&from=${fromDate}T00:00:00Z&to=${toDate}T23:59:59Z`);
+      if (seq !== seqRef.current) return;
+      setData(d);
     } catch (err) {
+      if (seq !== seqRef.current) return;
       setError(err instanceof Error ? err.message : '加载失败');
+    } finally {
+      if (seq === seqRef.current) setLoading(false);
     }
   }, [dim, fromDate, toDate]);
 
@@ -82,13 +92,22 @@ export default function Usage() {
           </div>
         ))}
 
+        {loading && <div className="spinner" style={{ margin: '40px auto' }} />}
         {error && <div className="alert-banner alert-critical"><CircleAlert /> {error}</div>}
 
-        {data === null && !error ? (
-          <div className="spinner" style={{ margin: '60px auto' }} />
-        ) : data && data.rows.length === 0 ? (
+        {!loading && !error && data === null ? (
+          <div className="empty">暂无数据</div>
+        ) : null}
+
+        {!loading && !error && data && data.rows.length === 0 ? (
           <div className="card card-pad empty">所选时间范围内没有 usage 记录</div>
-        ) : data ? (
+        ) : null}
+
+        {loading ? (
+          <div className="spinner" style={{ margin: '60px auto' }} />
+        ) : data.rows.length === 0 ? (
+          <div className="card card-pad empty">所选时间范围内没有 usage 记录</div>
+        ) : (
           <div className="card" style={{ overflow: 'hidden' }}>
             <table className="table">
               <thead>

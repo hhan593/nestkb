@@ -46,11 +46,18 @@ let refreshing: Promise<Tokens | null> | null = null;
 async function refreshTokens(): Promise<Tokens | null> {
   const cur = loadTokens();
   if (!cur?.refreshToken) return null;
-  const res = await fetch('/auth/refresh', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ refreshToken: cur.refreshToken }),
-  });
+  // 网络层错误（断网/后端重启）不能上抛原始 TypeError：并发等待刷新的请求会集体收到英文报错，
+  // 且跳过 saveTokens(null) 导致登录态残留、后续每个请求都重复失败刷新
+  let res: Response;
+  try {
+    res = await fetch('/auth/refresh', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ refreshToken: cur.refreshToken }),
+    });
+  } catch {
+    return null; // 网络异常视为刷新失败：调用方按未登录处理并跳转 /login
+  }
   if (!res.ok) {
     // 其他标签页可能已用更新的 refreshToken 完成轮换；若本地 token 已被别处替换，直接采用
     const now = loadTokens();
